@@ -2144,6 +2144,9 @@ func (process *TeleportProcess) initAuthService() error {
 	if err != nil {
 		return trace.Wrap(err)
 	}
+	if err := process.storage.PersistHostIDToStorages(process.ExitContext(), cfg, hostUUID); err != nil {
+		return trace.Wrap(err)
+	}
 	if _, err := uuid.Parse(hostUUID); err != nil {
 		cfg.Logger.WarnContext(process.ExitContext(), "Host UUID is not a true UUID (not eligible for UUID-based proxying)", "host_uuid", hostUUID)
 	}

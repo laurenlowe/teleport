@@ -14,7 +14,7 @@ import (
 )
 
 type Service interface {
-	Join(context.Context, chan<- messages.Request, <-chan messages.Response) error
+	Join(context.Context) (*messages.ClientStream, error)
 }
 
 type server struct {
@@ -23,59 +23,54 @@ type server struct {
 	service Service
 }
 
-func RegisterJoinServiceServer(s grpc.ServiceRegistrar) error {
-	joinv1.RegisterJoinServiceServer(s, &server{})
-	return nil
+func RegisterJoinServiceServer(s grpc.ServiceRegistrar, service Service) {
+	joinv1.RegisterJoinServiceServer(s, &server{
+		service: service,
+	})
 }
 
-func (s *server) Join(stream grpc.BidiStreamingServer[joinv1.JoinRequest, joinv1.JoinResponse]) error {
-	requests := make(chan messages.Request)
-	responses := make(chan messages.Response)
+func (s *server) Join(grpcStream grpc.BidiStreamingServer[joinv1.JoinRequest, joinv1.JoinResponse]) error {
+	messageStream, err := s.service.Join(grpcStream.Context())
+	if err != nil {
+		return trace.Wrap(err)
+	}
 
-	g, ctx := errgroup.WithContext(stream.Context())
+	g, ctx := errgroup.WithContext(grpcStream.Context())
 	g.Go(func() error {
-		return trace.Wrap(s.service.Join(ctx, requests, responses))
-	})
-	g.Go(func() error {
-		defer close(requests)
+		defer messageStream.CloseSend()
 		for {
-			req, err := stream.Recv()
+			req, err := grpcStream.Recv()
 			if errors.Is(err, io.EOF) {
-				// The client called CloseSend on the stream, this is not an error.
+				// The client called CloseSend on the grpcStream, this is not an error.
 				return nil
 			}
 			if err != nil {
-				return trace.Wrap(err, "reading client request from stream")
+				return trace.Wrap(err, "reading client request from gRPC stream")
 			}
-
-			msg, err := convertRequestToMessage(req)
+			msg, err := requestToMessage(req)
 			if err != nil {
 				return trace.Wrap(err)
 			}
-
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case requests <- msg:
+			if err := messageStream.Send(ctx, msg); err != nil {
+				return trace.Wrap(err)
 			}
 		}
 	})
 	g.Go(func() error {
 		for {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case resp, ok := <-responses:
-				if !ok {
-					return nil
-				}
-				msg, err := convertResponseFromMessage(resp)
-				if err != nil {
-					return trace.Wrap(err)
-				}
-				if err := stream.Send(msg); err != nil {
-					return trace.Wrap(err, "sending server response to stream")
-				}
+			msg, err := messageStream.Recv(ctx)
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			if err != nil {
+				return trace.Wrap(err)
+			}
+			resp, err := responseFromMessage(msg)
+			if err != nil {
+				return trace.Wrap(err)
+			}
+			if err := grpcStream.Send(resp); err != nil {
+				return trace.Wrap(err, "sending server response to gRPC stream")
 			}
 		}
 	})

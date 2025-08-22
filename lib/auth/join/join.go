@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/x509"
+	"encoding/pem"
 	"log/slog"
 	"net/http"
 	"os"
@@ -55,6 +56,8 @@ import (
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/githubactions"
 	"github.com/gravitational/teleport/lib/gitlab"
+	"github.com/gravitational/teleport/lib/join"
+	"github.com/gravitational/teleport/lib/join/messages"
 	"github.com/gravitational/teleport/lib/jwt"
 	kubetoken "github.com/gravitational/teleport/lib/kube/token"
 	"github.com/gravitational/teleport/lib/spacelift"
@@ -253,6 +256,8 @@ type RegisterResult struct {
 	// BoundKeypair contains additional results from bound keypair registration
 	// attempts. This is only set when bound keypair joining is used.
 	BoundKeypair *BoundKeypairRegisterResult
+	// HostID is the unique ID assigned to the host.
+	HostID string
 }
 
 // Register is used to get signed certificates when a node, proxy, or bot is
@@ -495,6 +500,7 @@ func registerThroughProxy(
 	return &RegisterResult{
 		Certs:      certs,
 		PrivateKey: hostKeys.privateKey,
+		HostID:     params.ID.HostID(),
 	}, nil
 }
 
@@ -539,6 +545,7 @@ type AuthJoinClient interface {
 	joinServiceClient
 	RegisterUsingToken(ctx context.Context, req *types.RegisterUsingTokenRequest) (*proto.Certs, error)
 	Ping(ctx context.Context) (proto.PingResponse, error)
+	JoinService() join.Service
 }
 
 func registerThroughAuthClient(
@@ -550,6 +557,16 @@ func registerThroughAuthClient(
 	hostKeys, err := generateHostKeysForAuth(ctx, client)
 	if err != nil {
 		return nil, trace.Wrap(err, "generating host keys")
+	}
+
+	result, err = tryNewJoin(ctx, token, params, client, hostKeys)
+	switch {
+	case err == nil:
+		return result, nil
+	case trace.IsNotImplemented(err):
+		slog.DebugContext(ctx, "new join service not implemented, falling back to legacy")
+	default:
+		return nil, trace.Wrap(err, "trying to join via new join service")
 	}
 
 	var certs *proto.Certs
@@ -581,7 +598,99 @@ func registerThroughAuthClient(
 	return &RegisterResult{
 		Certs:      certs,
 		PrivateKey: hostKeys.privateKey,
+		HostID:     params.ID.HostID(),
 	}, nil
+}
+
+func tryNewJoin(
+	ctx context.Context,
+	token string,
+	params RegisterParams,
+	client AuthJoinClient,
+	hostKeys *newHostKeys,
+) (*RegisterResult, error) {
+	switch params.JoinMethod {
+	case types.JoinMethodToken:
+	default:
+		return nil, trace.NotImplemented("non-token join methods not yet supported")
+	}
+	if params.ID.Role != types.RoleInstance {
+		return nil, trace.NotImplemented("new join service is only supported for getting Instance certs")
+	}
+	joinMethod := string(params.JoinMethod)
+	clientInit, err := clientInitMessageForParams(token, joinMethod, hostKeys, params)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stream, err := client.JoinService().Join(ctx)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	if err := stream.Send(ctx, clientInit); err != nil {
+		return nil, trace.Wrap(err)
+	}
+	stream.CloseSend()
+	msg, err := stream.Recv(ctx)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	result, ok := msg.(messages.Result)
+	if !ok {
+		return nil, trace.Errorf("expected result, got message with type %T", msg)
+	}
+	sshCert, err := sshPubToAuthorizedKey(result.SSHCert)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	sshCAKeys, err := sshPubsToAuthorizedKeys(result.SSHCAKeys)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	return &RegisterResult{
+		Certs: &proto.Certs{
+			TLS:        tlsCertToPEM(result.TLSCert),
+			TLSCACerts: tlsCertsToPEMs(result.TLSCACerts),
+			SSH:        sshCert,
+			SSHCACerts: sshCAKeys,
+		},
+		PrivateKey: hostKeys.privateKey,
+		HostID:     result.HostID,
+	}, nil
+}
+
+func tlsCertToPEM(rawCert []byte) []byte {
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rawCert})
+}
+
+func tlsCertsToPEMs(rawCerts [][]byte) [][]byte {
+	out := make([][]byte, len(rawCerts))
+	for i, rawCert := range rawCerts {
+		out[i] = tlsCertToPEM(rawCert)
+	}
+	return out
+}
+
+func sshPubToAuthorizedKey(rawPub []byte) ([]byte, error) {
+	pub, err := ssh.ParsePublicKey(rawPub)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	return ssh.MarshalAuthorizedKey(pub), nil
+}
+
+func sshPubsToAuthorizedKeys(rawPubs [][]byte) ([][]byte, error) {
+	out := make([][]byte, len(rawPubs))
+	for i, rawPub := range rawPubs {
+		var err error
+		out[i], err = sshPubToAuthorizedKey(rawPub)
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+	}
+	return out, nil
 }
 
 func getHostAddresses(params RegisterParams) []string {
@@ -769,12 +878,31 @@ func registerUsingTokenRequestForParams(token string, hostKeys *newHostKeys, par
 		Role:                 params.ID.Role,
 		AdditionalPrincipals: params.AdditionalPrincipals,
 		DNSNames:             params.DNSNames,
-		PublicTLSKey:         hostKeys.tlsPub,
-		PublicSSHKey:         hostKeys.sshPub,
+		PublicTLSKey:         hostKeys.tlsPubPEM,
+		PublicSSHKey:         ssh.MarshalAuthorizedKey(hostKeys.sshPub),
 		EC2IdentityDocument:  params.ec2IdentityDocument,
 		IDToken:              params.IDToken,
 		Expires:              params.Expires,
 	}
+}
+
+func clientInitMessageForParams(token string, joinMethod string, hostKeys *newHostKeys, params RegisterParams) (messages.Request, error) {
+	tlsPub, err := x509.MarshalPKIXPublicKey(hostKeys.tlsPub)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	sshPub := hostKeys.sshPub.Marshal()
+	return messages.ClientInit{
+		JoinMethod:           &joinMethod,
+		TokenName:            token,
+		NodeName:             params.ID.NodeName,
+		Role:                 params.ID.Role.String(),
+		AdditionalPrincipals: params.AdditionalPrincipals,
+		DNSNames:             params.DNSNames,
+		PublicTLSKey:         tlsPub,
+		PublicSSHKey:         sshPub,
+		Expires:              params.Expires,
+	}, nil
 }
 
 // registerUsingIAMMethod is used to register using the IAM join method. It is
@@ -1052,6 +1180,7 @@ func registerUsingBoundKeypairMethod(
 			BoundPublicKey: regResponse.BoundPublicKey,
 			JoinState:      regResponse.JoinState,
 		},
+		HostID: params.ID.HostID(),
 	}, nil
 }
 
@@ -1071,8 +1200,9 @@ func readCA(path string) (*x509.Certificate, error) {
 
 type newHostKeys struct {
 	privateKey crypto.Signer
-	sshPub     []byte
-	tlsPub     []byte
+	sshPub     ssh.PublicKey
+	tlsPub     crypto.PublicKey
+	tlsPubPEM  []byte
 }
 
 func generateHostKeysForProxy(ctx context.Context, insecure bool, proxyAddr string) (*newHostKeys, error) {
@@ -1110,13 +1240,14 @@ func generateHostKeys(ctx context.Context, getSuite cryptosuites.GetSuiteFunc) (
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	tlsPub, err := keys.MarshalPublicKey(key.Public())
+	tlsPubPEM, err := keys.MarshalPublicKey(key.Public())
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
 	return &newHostKeys{
 		privateKey: key,
-		sshPub:     ssh.MarshalAuthorizedKey(sshPub),
-		tlsPub:     tlsPub,
+		sshPub:     sshPub,
+		tlsPub:     key.Public(),
+		tlsPubPEM:  tlsPubPEM,
 	}, nil
 }

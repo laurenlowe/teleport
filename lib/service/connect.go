@@ -516,6 +516,9 @@ func (process *TeleportProcess) firstTimeConnect(role types.SystemRole) (*Connec
 	if err := process.storage.WriteIdentity(state.IdentityCurrent, *identity); err != nil {
 		process.logger.WarnContext(process.ExitContext(), "Failed to write identity to storage.", "identity", role, "error", err)
 	}
+	if err := process.storage.PersistHostIDToStorages(process.ExitContext(), process.Config, identity.ID.HostID()); err != nil {
+		process.logger.WarnContext(process.ExitContext(), "Failed to write host UUID to storage.", "identity", role, "error", err)
+	}
 
 	err = process.storage.WriteState(role, state.StateV2{
 		Spec: state.StateSpecV2{

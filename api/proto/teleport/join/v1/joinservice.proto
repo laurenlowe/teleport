@@ -51,21 +51,15 @@ message ClientInit {
   optional ProxySuppliedParameters proxy_supplied_parameters = 10;
 }
 
-// ChallengeSolution holds a solution to a challenge issued by the server.
-message ChallengeSolution {}
-
 // JoinRequest is the message type sent from the joining client to the server.
 message JoinRequest {
   oneof payload {
     ClientInit client_init = 1;
-    ChallengeSolution challenge_solution = 2;
   }
 }
 
 // ServerInit is the first message sent from the server in response to the
-// ClientInit message. It contains the join method name, and it may include a
-// challenge if the join method requires the server to issue a challenge that
-// does not depend on information from the client.
+// ClientInit message.
 message ServerInit {
   // JoinMethod is the name of the selected join method.
   string join_method = 1;

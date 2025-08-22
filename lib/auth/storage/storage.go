@@ -355,11 +355,6 @@ func readOrGenerateHostID(ctx context.Context, cfg *servicecfg.Config, kubeBacke
 			}
 			cfg.Logger.InfoContext(ctx, "Generating new host UUID", "host_uuid", hostID)
 		}
-		// persistHostUUIDToStorages will persist the host_uuid to the local storage
-		// and to Kubernetes Secret if this process is running on a Kubernetes Cluster.
-		if err := persistHostIDToStorages(ctx, cfg, hostID, kubeBackend); err != nil {
-			return "", trace.Wrap(err)
-		}
 	}
 	return hostID, nil
 }
@@ -380,6 +375,16 @@ func readHostIDFromStorages(ctx context.Context, dataDir string, kubeBackend sta
 	// not found in secret.
 	hostID, err := hostid.ReadFile(dataDir)
 	return hostID, trace.Wrap(err)
+}
+
+// PersistHostIDToStorages writes the host ID to local data and to
+// Kubernetes Secret if this process is running on a Kubernetes Cluster.
+func (p *ProcessStorage) PersistHostIDToStorages(ctx context.Context, cfg *servicecfg.Config, hostID string) error {
+	err := persistHostIDToStorages(ctx, cfg, hostID, p.stateStorage)
+	if trace.IsAlreadyExists(err) {
+		return nil
+	}
+	return trace.Wrap(err)
 }
 
 // persistHostIDToStorages writes the host ID to local data and to

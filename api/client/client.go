@@ -116,6 +116,8 @@ import (
 	"github.com/gravitational/teleport/api/utils/clientutils"
 	grpcutils "github.com/gravitational/teleport/api/utils/grpc"
 	"github.com/gravitational/teleport/api/utils/grpc/interceptors"
+	"github.com/gravitational/teleport/lib/join"
+	"github.com/gravitational/teleport/lib/join/joinv1"
 )
 
 func init() {
@@ -154,10 +156,17 @@ type Client struct {
 	grpc AuthServiceClient
 	// JoinServiceClient is a client for the JoinService, which runs on both the
 	// auth and proxy.
+	// Legacy
 	*JoinServiceClient
+	// New
+	joinService join.Service
 	// closedFlag is set to indicate that the connection is closed.
 	// It's a pointer to allow the Client struct to be copied.
 	closedFlag *int32
+}
+
+func (c *Client) JoinService() join.Service {
+	return c.joinService
 }
 
 // New creates a new Client with an open connection to a Teleport server.
@@ -548,6 +557,7 @@ func (c *Client) dialGRPC(ctx context.Context, addr string) error {
 		RecordingEncryptionServiceClient: recordingencryptionv1pb.NewRecordingEncryptionServiceClient(c.conn),
 	}
 	c.JoinServiceClient = NewJoinServiceClient(proto.NewJoinServiceClient(c.conn))
+	c.joinService = joinv1.NewClient(c.conn)
 
 	return nil
 }

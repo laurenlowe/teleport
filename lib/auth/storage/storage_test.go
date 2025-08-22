@@ -199,6 +199,8 @@ func Test_readOrGenerateHostID(t *testing.T) {
 
 			require.True(t, tt.wantFunc(hostID))
 
+			err = persistHostIDToStorages(context.Background(), cfg, kubeBackend, hostID)
+			require.NoError(t, err)
 			if tt.args.kubeBackend != nil {
 				require.True(t, tt.wantKubeItemFunc(tt.args.kubeBackend.putData))
 			}
