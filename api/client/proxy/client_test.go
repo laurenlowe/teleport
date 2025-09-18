@@ -43,6 +43,7 @@ import (
 	"github.com/gravitational/teleport/api/client"
 	"github.com/gravitational/teleport/api/client/proto"
 	transportv1pb "github.com/gravitational/teleport/api/gen/proto/go/teleport/transport/v1"
+	transportv2pb "github.com/gravitational/teleport/api/gen/proto/go/teleport/transport/v2"
 	"github.com/gravitational/teleport/api/trail"
 	"github.com/gravitational/teleport/api/utils/grpc/stream"
 )
@@ -84,6 +85,23 @@ func (s fakeTransportService) ProxyCluster(stream transportv1pb.TransportService
 	return s.cluster(stream)
 }
 
+type fakeProxySSHServerV2 func(transportv2pb.TransportService_ProxySSHServer) error
+
+// fakeTransportService is a [transportv1pb.TransportServiceServer] implementation
+// that allows tests to manipulate the server side of various RPCs.
+type fakeTransportServiceV2 struct {
+	transportv2pb.UnimplementedTransportServiceServer
+
+	ssh fakeProxySSHServerV2
+}
+
+func (s fakeTransportServiceV2) ProxySSH(stream transportv2pb.TransportService_ProxySSHServer) error {
+	if s.ssh == nil {
+		return s.UnimplementedTransportServiceServer.ProxySSH(stream)
+	}
+	return s.ssh(stream)
+}
+
 // newGRPCServer creates a [grpc.Server] and registers the
 // provided [transportv1pb.TransportServiceServer].
 func newGRPCServer(t *testing.T, srv transportv1pb.TransportServiceServer) *fakeGRPCServer {
@@ -97,6 +115,31 @@ func newGRPCServer(t *testing.T, srv transportv1pb.TransportServiceServer) *fake
 	// Register service.
 	if srv != nil {
 		transportv1pb.RegisterTransportServiceServer(s, srv)
+	}
+
+	// Start.
+	go func() {
+		if err := s.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			panic(fmt.Sprintf("Serve returned err = %v", err))
+		}
+	}()
+
+	return &fakeGRPCServer{Listener: lis}
+}
+
+// newGRPCServer creates a [grpc.Server] and registers the
+// provided [transportv1pb.TransportServiceServer].
+func newGRPCServerV2(t *testing.T, srv transportv2pb.TransportServiceServer) *fakeGRPCServer {
+	// gRPC testPack.
+	lis := bufconn.Listen(100)
+	t.Cleanup(func() { require.NoError(t, lis.Close()) })
+
+	s := grpc.NewServer()
+	t.Cleanup(s.Stop)
+
+	// Register service.
+	if srv != nil {
+		transportv2pb.RegisterTransportServiceServer(s, srv)
 	}
 
 	// Start.
@@ -219,6 +262,14 @@ func (f *fakeProxy) clientConfig(t *testing.T) ClientConfig {
 	}
 }
 
+func newFakeProxyV2(t *testing.T, transportService transportv2pb.TransportServiceServer) *fakeProxy {
+	grpcSrv := newGRPCServerV2(t, transportService)
+
+	return &fakeProxy{
+		fakeGRPCServer: grpcSrv,
+	}
+}
+
 func TestNewClient(t *testing.T) {
 	t.Parallel()
 
@@ -326,17 +377,14 @@ func TestClient_DialHost(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		srv       transportv1pb.TransportServiceServer
+		srv       transportv2pb.TransportServiceServer
 		keyring   agent.ExtendedAgent
 		assertion func(t *testing.T, conn net.Conn, details ClusterDetails, err error)
 	}{
 		{
 			name: "grpc connection fails",
-			srv: fakeTransportService{
-				details: func(ctx context.Context, request *transportv1pb.GetClusterDetailsRequest) (*transportv1pb.GetClusterDetailsResponse, error) {
-					return &transportv1pb.GetClusterDetailsResponse{Details: &transportv1pb.ClusterDetails{FipsEnabled: true}}, nil
-				},
-				ssh: func(server transportv1pb.TransportService_ProxySSHServer) error {
+			srv: fakeTransportServiceV2{
+				ssh: func(server transportv2pb.TransportService_ProxySSHServer) error {
 					_, err := server.Recv()
 					if err != nil {
 						return trail.ToGRPC(trace.Wrap(err))
@@ -353,17 +401,15 @@ func TestClient_DialHost(t *testing.T) {
 		},
 		{
 			name: "grpc connection established",
-			srv: fakeTransportService{
-				details: func(ctx context.Context, request *transportv1pb.GetClusterDetailsRequest) (*transportv1pb.GetClusterDetailsResponse, error) {
-					return &transportv1pb.GetClusterDetailsResponse{Details: &transportv1pb.ClusterDetails{FipsEnabled: true}}, nil
-				},
-				ssh: func(server transportv1pb.TransportService_ProxySSHServer) error {
+			srv: fakeTransportServiceV2{
+				ssh: func(server transportv2pb.TransportService_ProxySSHServer) error {
 					_, err := server.Recv()
 					if err != nil {
 						return trail.ToGRPC(trace.Wrap(err))
 					}
 
-					if err := server.Send(&transportv1pb.ProxySSHResponse{Details: &transportv1pb.ClusterDetails{FipsEnabled: true}}); err != nil {
+					if err := server.Send(&transportv2pb.ProxySSHResponse{
+						Payload: &transportv2pb.ProxySSHResponse_Details{Details: &transportv2pb.ClusterDetails{FipsEnabled: true}}}); err != nil {
 						return trail.ToGRPC(err)
 					}
 
@@ -372,11 +418,10 @@ func TestClient_DialHost(t *testing.T) {
 						return trail.ToGRPC(trace.Wrap(err))
 					}
 
-					switch f := req.Frame.(type) {
-					case *transportv1pb.ProxySSHRequest_Ssh:
-						if err := server.Send(&transportv1pb.ProxySSHResponse{
-							Details: nil,
-							Frame:   &transportv1pb.ProxySSHResponse_Ssh{Ssh: &transportv1pb.Frame{Payload: f.Ssh.Payload}},
+					switch f := req.GetPayload().(type) {
+					case *transportv2pb.ProxySSHRequest_Ssh:
+						if err := server.Send(&transportv2pb.ProxySSHResponse{
+							Payload: &transportv2pb.ProxySSHResponse_Ssh{Ssh: &transportv2pb.Frame{Payload: f.Ssh.Payload}},
 						}); err != nil {
 							return trail.ToGRPC(trace.Wrap(err))
 						}
@@ -411,7 +456,7 @@ func TestClient_DialHost(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			proxy := newFakeProxy(t, test.srv)
+			proxy := newFakeProxyV2(t, test.srv)
 			cfg := proxy.clientConfig(t)
 
 			clt, err := NewClient(ctx, cfg)

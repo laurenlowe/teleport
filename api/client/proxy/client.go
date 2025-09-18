@@ -36,8 +36,10 @@ import (
 	"github.com/gravitational/teleport/api/breaker"
 	"github.com/gravitational/teleport/api/client"
 	"github.com/gravitational/teleport/api/client/proxy/transport/transportv1"
+	"github.com/gravitational/teleport/api/client/proxy/transport/transportv2"
 	"github.com/gravitational/teleport/api/defaults"
 	transportv1pb "github.com/gravitational/teleport/api/gen/proto/go/teleport/transport/v1"
+	transportv2pb "github.com/gravitational/teleport/api/gen/proto/go/teleport/transport/v2"
 	"github.com/gravitational/teleport/api/metadata"
 	grpcutils "github.com/gravitational/teleport/api/utils/grpc"
 	"github.com/gravitational/teleport/api/utils/grpc/interceptors"
@@ -208,6 +210,8 @@ type Client struct {
 	grpcConn *grpc.ClientConn
 	// transport is the transportv1.Client
 	transport *transportv1.Client
+	// transport is the transportv2.Client
+	transportv2 *transportv2.Client
 	// clusterName as determined by inspecting the certificate presented by
 	// the Proxy during the connection handshake.
 	clusterName *clusterName
@@ -369,6 +373,11 @@ func newGRPCClient(ctx context.Context, cfg *ClientConfig) (_ *Client, err error
 		return nil, trace.Wrap(err)
 	}
 
+	transportv2, err := transportv2.NewClient(transportv2pb.NewTransportServiceClient(conn))
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
 	var relayGrpcConn *grpc.ClientConn
 	var relayTransport *transportv1.Client
 	if cfg.RelayAddress != "" {
@@ -406,6 +415,7 @@ func newGRPCClient(ctx context.Context, cfg *ClientConfig) (_ *Client, err error
 		cfg:         cfg,
 		grpcConn:    conn,
 		transport:   transport,
+		transportv2: transportv2,
 		clusterName: c,
 
 		relayGrpcConn:  relayGrpcConn,
@@ -500,12 +510,26 @@ func (c *Client) ClientConfig(ctx context.Context, cluster string) (client.Confi
 // DialHost establishes a connection to the `target` in cluster named `cluster`. If a keyring
 // is provided it will only be forwarded if proxy recording mode is enabled in the cluster.
 func (c *Client) DialHost(ctx context.Context, target, cluster string, keyring agent.ExtendedAgent) (net.Conn, ClusterDetails, error) {
-	conn, details, err := cmp.Or(c.relayTransport, c.transport).DialHost(ctx, target, cluster, nil, keyring)
-	if err != nil {
-		return nil, ClusterDetails{}, trace.ConnectionProblem(err, "failed connecting to host %s: %v", target, err)
-	}
+	// Prefer to use the relay transport if it is configured.
+	// TODO(cthach): Add support for transportv2 relay.
+	switch {
+	case c.relayTransport != nil:
+		conn, detailsv1, err := c.relayTransport.DialHost(ctx, target, cluster, nil, keyring)
+		if err != nil {
+			return nil, ClusterDetails{}, trace.ConnectionProblem(err, "failed connecting to host %s in cluster %s via relay: %v", target, cluster, err)
+		}
+		return conn, ClusterDetails{FIPS: detailsv1.FipsEnabled}, nil
 
-	return conn, ClusterDetails{FIPS: details.FipsEnabled}, nil
+	case c.transport != nil:
+		conn, detailsv2, err := c.transportv2.DialHost(ctx, target, cluster, nil, keyring)
+		if err != nil {
+			return nil, ClusterDetails{}, trace.ConnectionProblem(err, "failed connecting to host %s in cluster %s via transportv2: %v", target, cluster, err)
+		}
+		return conn, ClusterDetails{FIPS: detailsv2.FipsEnabled}, nil
+
+	default:
+		return nil, ClusterDetails{}, trace.ConnectionProblem(nil, "no transport available to connect to host %s", target)
+	}
 }
 
 // ClusterDetails retrieves cluster information as seen by the Proxy.

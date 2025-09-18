@@ -75,6 +75,7 @@ import (
 	integrationpb "github.com/gravitational/teleport/api/gen/proto/go/teleport/integration/v1"
 	kubeproto "github.com/gravitational/teleport/api/gen/proto/go/teleport/kube/v1"
 	transportpb "github.com/gravitational/teleport/api/gen/proto/go/teleport/transport/v1"
+	transportpbv2 "github.com/gravitational/teleport/api/gen/proto/go/teleport/transport/v2"
 	"github.com/gravitational/teleport/api/types"
 	"github.com/gravitational/teleport/api/types/discoveryconfig"
 	apievents "github.com/gravitational/teleport/api/types/events"
@@ -172,6 +173,7 @@ import (
 	"github.com/gravitational/teleport/lib/srv/mcp"
 	"github.com/gravitational/teleport/lib/srv/regular"
 	"github.com/gravitational/teleport/lib/srv/transport/transportv1"
+	"github.com/gravitational/teleport/lib/srv/transport/transportv2"
 	"github.com/gravitational/teleport/lib/sshutils"
 	"github.com/gravitational/teleport/lib/system"
 	"github.com/gravitational/teleport/lib/tlsca"
@@ -5536,6 +5538,7 @@ func (process *TeleportProcess) initProxyEndpoint(conn *Connector) error {
 		return trace.Wrap(err)
 	}
 
+	// TODO(cthach): Remove when TransportV1 is deprecated and no longer needed.
 	transportService, err := transportv1.NewService(transportv1.ServerConfig{
 		FIPS:   cfg.FIPS,
 		Logger: process.logger.With(teleport.ComponentKey, "transport"),
@@ -5550,6 +5553,22 @@ func (process *TeleportProcess) initProxyEndpoint(conn *Connector) error {
 		return trace.Wrap(err)
 	}
 	transportpb.RegisterTransportServiceServer(sshGRPCServer, transportService)
+
+	transportServiceV2, err := transportv2.NewService(transportv2.ServerConfig{
+		FIPS:   cfg.FIPS,
+		Logger: process.logger.With(teleport.ComponentKey, "transport"),
+		Dialer: proxyRouter,
+		SignerFn: func(authzCtx *authz.Context, clusterName string) agentless.SignerCreator {
+			return agentless.SignerFromAuthzContext(authzCtx, accessPoint, clusterName)
+		},
+		ConnectionMonitor: connMonitor,
+		LocalAddr:         listeners.sshGRPC.Addr(),
+		AuthClient:        conn.Client,
+	})
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	transportpbv2.RegisterTransportServiceServer(sshGRPCServer, transportServiceV2)
 
 	process.RegisterCriticalFunc("proxy.ssh", func() error {
 		sshListenerAddr := listeners.ssh.Addr().String()

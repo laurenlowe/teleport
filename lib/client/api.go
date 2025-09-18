@@ -2031,6 +2031,8 @@ func (tc *TeleportClient) ConnectToNode(ctx context.Context, clt *ClusterClient,
 	)
 	defer func() { apitracing.EndSpan(span, err) }()
 
+	// TODO(cthach): Refactor to use new in-band MFA session establishment APIs.
+
 	// if per-session mfa is required, perform the mfa ceremony to get
 	// new certificates and use them to connect.
 	if nodeDetails.MFACheck != nil && nodeDetails.MFACheck.Required {
