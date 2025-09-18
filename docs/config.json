@@ -2769,6 +2769,11 @@
       "source": "/enroll-resources/application-access/guides/tcp/",
       "destination": "/enroll-resources/application-access/protect-apps/tcp/",
       "permanent": true
+    },
+    {
+      "source": "/identity-governance/access-lists/terraform/",
+      "destination": "/zero-trust-access/infrastructure-as-code/managing-resources/access-list/",
+      "permanent": true
     }
   ]
 }
