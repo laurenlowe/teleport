@@ -33,10 +33,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	oteltrace "go.opentelemetry.io/otel/trace"
 	"golang.org/x/crypto/ssh"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/gravitational/teleport"
-	decisionpb "github.com/gravitational/teleport/api/gen/proto/go/teleport/decision/v1alpha1"
 	"github.com/gravitational/teleport/api/observability/tracing"
 	"github.com/gravitational/teleport/api/types"
 	apiutils "github.com/gravitational/teleport/api/utils"
@@ -304,45 +302,47 @@ func (r *Router) DialHost(ctx context.Context, clientSrcAddr, clientDstAddr net.
 	}
 
 	var permitBytes []byte
-	if loginName := maybeLoginName; loginName != "" {
-		// XXX: prototype invocation. extremely problematic. relies on dry run features, does not properly handle
-		// remote users, does not obey cert state, etc. DO NOT MERGE.
-		decision, err := r.pdp.EvaluateSSHAccess(ctx, &decisionpb.EvaluateSSHAccessRequest{
-			Metadata: &decisionpb.RequestMetadata{
-				PepVersionHint: teleport.Version,
-			},
-			SshAuthority: &decisionpb.SSHAuthority{
-				ClusterName:   r.clusterName, // XXX: in real logic, this *must* be derived from signing CA of user identity
-				AuthorityType: string(types.UserCA),
-			},
-			SshIdentity: decision.SSHIdentityFromSSHCA(identity),
-			Node: &decisionpb.Resource{
-				Kind: target.GetKind(),
-				Name: target.GetName(),
-			},
-			OsUser: loginName,
-		})
-		if err != nil {
-			return nil, trace.Wrap(err)
-		}
 
-		if denial := decision.GetDenial(); denial != nil {
-			if denial.Metadata != nil && denial.Metadata.UserMessage != "" {
-				return nil, trace.AccessDenied("pdp: %s", denial.Metadata.UserMessage)
-			}
-			return nil, trace.AccessDenied("pdp: access denied")
-		}
+	// TODO(cthach): Disabled because getting the permit should happen in ProxySSH RPC.
+	// if loginName := maybeLoginName; loginName != "" {
+	// 	// XXX: prototype invocation. extremely problematic. relies on dry run features, does not properly handle
+	// 	// remote users, does not obey cert state, etc. DO NOT MERGE.
+	// 	decision, err := r.pdp.EvaluateSSHAccess(ctx, &decisionpb.EvaluateSSHAccessRequest{
+	// 		Metadata: &decisionpb.RequestMetadata{
+	// 			PepVersionHint: teleport.Version,
+	// 		},
+	// 		SshAuthority: &decisionpb.SSHAuthority{
+	// 			ClusterName:   r.clusterName, // XXX: in real logic, this *must* be derived from signing CA of user identity
+	// 			AuthorityType: string(types.UserCA),
+	// 		},
+	// 		SshIdentity: decision.SSHIdentityFromSSHCA(identity),
+	// 		Node: &decisionpb.Resource{
+	// 			Kind: target.GetKind(),
+	// 			Name: target.GetName(),
+	// 		},
+	// 		OsUser: loginName,
+	// 	})
+	// 	if err != nil {
+	// 		return nil, trace.Wrap(err)
+	// 	}
 
-		permit := decision.GetPermit()
-		if permit == nil {
-			return nil, trace.AccessDenied("pdp: access denied (missing permit)")
-		}
+	// 	if denial := decision.GetDenial(); denial != nil {
+	// 		if denial.Metadata != nil && denial.Metadata.UserMessage != "" {
+	// 			return nil, trace.AccessDenied("pdp: %s", denial.Metadata.UserMessage)
+	// 		}
+	// 		return nil, trace.AccessDenied("pdp: access denied")
+	// 	}
 
-		permitBytes, err = proto.Marshal(permit)
-		if err != nil {
-			return nil, trace.Wrap(err)
-		}
-	}
+	// 	permit := decision.GetPermit()
+	// 	if permit == nil {
+	// 		return nil, trace.AccessDenied("pdp: access denied (missing permit)")
+	// 	}
+
+	// 	permitBytes, err = proto.Marshal(permit)
+	// 	if err != nil {
+	// 		return nil, trace.Wrap(err)
+	// 	}
+	// }
 
 	conn, err := cluster.Dial(reversetunnelclient.DialParams{
 		From:                  clientSrcAddr,
