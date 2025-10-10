@@ -137,3 +137,9 @@ func (a *AccessListMember) Clone() *AccessListMember {
 func (a *AccessListMember) IsExpired(t time.Time) bool {
 	return !a.Spec.Expires.IsZero() && !t.Before(a.Spec.Expires)
 }
+
+// IsMembershipKindUser returns true if the membership kind is User
+// All types expect "MEMBERSHIP_KIND_LIST" are treated as "MEMBERSHIP_KIND_USER".
+func (a *AccessListMember) IsMembershipKindUser() bool {
+	return isMembershipKindUser(a.Spec.MembershipKind)
+}
