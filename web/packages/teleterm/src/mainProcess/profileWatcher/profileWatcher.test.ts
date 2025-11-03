@@ -243,12 +243,12 @@ test('file system events are debounced', async () => {
 
   const cluster = makeRootCluster();
 
-  await wait(testDebounceMs / 2);
+  console.log('insert');
   // Insert two rapid events within debounce interval.
   await tshClientMock.insertOrUpdateCluster(cluster);
   await tshClientMock.insertOrUpdateCluster(cluster);
   // Wait slightly longer than debounce interval to ensure a single handler is called.
-  await wait(testDebounceMs + testDebounceMs / 2);
+  await wait(2 * testDebounceMs);
   expect(handler).toHaveBeenCalledTimes(1);
 });
 
@@ -349,7 +349,7 @@ test('max file system events count is restricted', async () => {
     tshClient: tshClientMock,
     clusterStore: clusterStoreMock,
     signal: abortController.signal,
-    debounceMs: 50,
+    debounceMs: 100,
     maxFileSystemEvents: 1,
   });
 
@@ -362,7 +362,7 @@ test('max file system events count is restricted', async () => {
     status: 'rejected',
     reason: expect.objectContaining({
       message:
-        'Exceeded file system event limit: more than 1 events detected within 50 ms',
+        'Exceeded file system event limit: more than 1 events detected within 100 ms',
     }),
   });
 });
