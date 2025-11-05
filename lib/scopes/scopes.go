@@ -409,6 +409,47 @@ func Compare(lhs, rhs string) Relationship {
 	}
 }
 
+// SortCmp is a helper function for sorting scopes. Scope sort order differs from lexographic sort of
+// a scope's string representation in some cases.  For example, the lexogrphically sorted sequence
+// of scopes ['/aa', '/aa-bb', '/aa/bb'] is different from the scope-sorted sequence
+// ['/aa', '/aa/bb', '/aa-bb'].
+func SortCmp(lhs, rhs string) int {
+	if lhs == rhs {
+		return 0
+	}
+
+	lNext, lStop := iter.Pull(DescendingSegments(lhs))
+	defer lStop()
+
+	rNext, rStop := iter.Pull(DescendingSegments(rhs))
+	defer rStop()
+
+	for {
+		lVal, lOk := lNext()
+		rVal, rOk := rNext()
+
+		switch {
+		case lOk && rOk:
+			// both scopes have segments left to compare
+			if lVal == rVal {
+				// scopes are still equivalent at this level, continue processing
+				continue
+			}
+			// scopes have diverged
+			return strings.Compare(lVal, rVal)
+		case lOk && !rOk:
+			// the right hand side scope is an ancestor of the left hand side scope
+			return 1
+		case !lOk && rOk:
+			// the left hand side scope is an ancestor of the right hand side scope
+			return -1
+		case !lOk && !rOk:
+			// scopes are equivalent
+			return 0
+		}
+	}
+}
+
 // PolicyScope is a helper for constructing unambiguous checks in access control logic. Prefer helpers like
 // this over using the Compare function directly, as it improves readability and reduces the risk of misuse. Ex:
 //

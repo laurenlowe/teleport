@@ -591,6 +591,82 @@ func TestCompare(t *testing.T) {
 	}
 }
 
+// Test SortCmp verifies that the SortCmp function produces the expected ordering for various scopes.
+func TestSortCmp(t *testing.T) {
+	t.Parallel()
+
+	tts := []struct {
+		name        string
+		scopes      []string
+		expected    []string
+		lexographic bool
+	}{
+		{
+			name:        "basic hierarchy",
+			scopes:      []string{"/aa/bb", "/aa", "/", "/aa/bb/cc"},
+			expected:    []string{"/", "/aa", "/aa/bb", "/aa/bb/cc"},
+			lexographic: true,
+		},
+		{
+			name:        "basic non-lexographic",
+			scopes:      []string{"/aa-bb", "/aa", "/", "/aa/bb", "/aa/bb-cc"},
+			expected:    []string{"/", "/aa", "/aa/bb", "/aa/bb-cc", "/aa-bb"},
+			lexographic: false,
+		},
+		{
+			name:        "empty",
+			scopes:      []string{},
+			expected:    []string{},
+			lexographic: true,
+		},
+		{
+			name:        "single element",
+			scopes:      []string{"/aa/bb/cc"},
+			expected:    []string{"/aa/bb/cc"},
+			lexographic: true,
+		},
+		{
+			name:        "missing prefixes",
+			scopes:      []string{"/aa/bb/cc", "aa/bb", "/aa", "/", "xx/yy", "/xx/yy"},
+			expected:    []string{"/", "/aa", "aa/bb", "/aa/bb/cc", "xx/yy", "/xx/yy"},
+			lexographic: false,
+		},
+		{
+			name:        "dangling suffixes",
+			scopes:      []string{"/aa/bb/cc/", "/aa/", "/"},
+			expected:    []string{"/", "/aa/", "/aa/bb/cc/"},
+			lexographic: true,
+		},
+		{
+			name:        "prefix and suffix do not affect ordering of equivalents",
+			scopes:      []string{"xx/yy", "/aa/bb/", "/xx/yy", "/aa/bb", "/aa/bb/", "xx/yy"},
+			expected:    []string{"/aa/bb/", "/aa/bb", "/aa/bb/", "xx/yy", "/xx/yy", "xx/yy"},
+			lexographic: false,
+		},
+	}
+
+	for _, tt := range tts {
+		t.Run(tt.name, func(t *testing.T) {
+			sorted := make([]string, len(tt.scopes))
+			copy(sorted, tt.scopes)
+
+			slices.SortFunc(sorted, SortCmp)
+
+			require.Equal(t, tt.expected, sorted, "expected scope sort")
+
+			lex := make([]string, len(tt.scopes))
+			copy(lex, tt.scopes)
+			slices.Sort(lex)
+
+			if tt.lexographic {
+				require.Equal(t, lex, sorted, "scope sort is expected to match lexographic sort")
+			} else {
+				require.NotEqual(t, lex, sorted, "scope sort is expected to differ from lexographic sort")
+			}
+		})
+	}
+}
+
 // TestPolicyAndResourceScope tests the relationship between policy and resource scopes helpers
 // given various combinations of policy and resource scopes.
 func TestPolicyAndResourceScope(t *testing.T) {
