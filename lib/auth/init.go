@@ -594,6 +594,13 @@ func initCluster(ctx context.Context, cfg InitConfig, asrv *Server) error {
 		return trace.Wrap(asrv.SetStaticTokens(cfg.StaticTokens))
 	})
 
+	g.Go(func() error {
+		_, span := cfg.Tracer.Start(gctx, "auth/SetStaticScopedTokens")
+		defer span.End()
+		asrv.logger.InfoContext(ctx, "Updating cluster configuration", "static_scoped_tokens", cfg.StaticScopedTokens)
+		return trace.Wrap(asrv.SetStaticScopedTokens(cfg.StaticScopedTokens))
+	})
+
 	var cn types.ClusterName
 	g.Go(func() error {
 		_, span := cfg.Tracer.Start(gctx, "auth/SetClusterName")
