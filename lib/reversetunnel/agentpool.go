@@ -27,6 +27,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -140,6 +142,11 @@ type AgentPoolConfig struct {
 	LocalAuthAddresses []string
 	// PROXYSigner is used to sign PROXY headers for securely propagating client IP address
 	PROXYSigner multiplexer.PROXYHeaderSigner
+	// HeartbeatTimeout is the timeout for server heartbeat responses.
+	// By default this is set to [defaults.DefaultIOTimeout].
+	HeartbeatTimeout time.Duration
+	// HeartbeatTimeoutDisabled is true if heartbeat timeouts are disabled.
+	HeartbeatTimeoutDisabled bool
 }
 
 // CheckAndSetDefaults checks and sets defaults.
@@ -165,6 +172,15 @@ func (cfg *AgentPoolConfig) CheckAndSetDefaults() error {
 	if cfg.ConnectedProxyGetter == nil {
 		cfg.ConnectedProxyGetter = NewConnectedProxyGetter()
 	}
+	if cfg.HeartbeatTimeout == 0 {
+		cfg.HeartbeatTimeout = defaults.DefaultIOTimeout
+	}
+
+	if !cfg.HeartbeatTimeoutDisabled {
+		// If not explicitly disabled, check for the environment variable.
+		cfg.HeartbeatTimeoutDisabled = isHeartbeatTimeoutDisabledByEnv()
+	}
+
 	return nil
 }
 
@@ -442,6 +458,22 @@ func (p *AgentPool) getStateCallback(agent Agent) AgentStateCallback {
 	}
 }
 
+// isHeartbeatTimeoutDisabledByEnv returns true if the TELEPORT_UNSTABLE_DISABLE_AGENT_HEARTBEAT_TIMEOUT
+// environment variable is set.
+//
+// Either "yes" or a "truthy" value (as defined by [strconv.ParseBool]) are
+// considered true.
+func isHeartbeatTimeoutDisabledByEnv() bool {
+	const envVar = "TELEPORT_UNSTABLE_DISABLE_AGENT_HEARTBEAT_TIMEOUT"
+
+	if val := os.Getenv(envVar); val != "" {
+		b, _ := strconv.ParseBool(val)
+		return b || val == "yes"
+	}
+
+	return false
+}
+
 // newAgent creates a new agent instance.
 func (p *AgentPool) newAgent(ctx context.Context, tracker *track.Tracker, lease *track.Lease) (Agent, error) {
 	addr, _, err := p.Resolver(ctx)
@@ -470,17 +502,19 @@ func (p *AgentPool) newAgent(ctx context.Context, tracker *track.Tracker, lease 
 	}
 
 	agent, err := newAgent(agentConfig{
-		addr:               *addr,
-		keepAlive:          p.runtimeConfig.keepAliveInterval,
-		sshDialer:          dialer,
-		transportHandler:   p,
-		versionGetter:      p,
-		tracker:            tracker,
-		lease:              lease,
-		clock:              p.Clock,
-		logger:             p.logger,
-		localAuthAddresses: p.LocalAuthAddresses,
-		proxySigner:        p.PROXYSigner,
+		addr:                     *addr,
+		keepAlive:                p.runtimeConfig.keepAliveInterval,
+		sshDialer:                dialer,
+		transportHandler:         p,
+		versionGetter:            p,
+		tracker:                  tracker,
+		lease:                    lease,
+		clock:                    p.Clock,
+		logger:                   p.logger,
+		localAuthAddresses:       p.LocalAuthAddresses,
+		proxySigner:              p.PROXYSigner,
+		heartbeatTimeout:         p.HeartbeatTimeout,
+		heartbeatTimeoutDisabled: p.HeartbeatTimeoutDisabled,
 	})
 	if err != nil {
 		return nil, trace.Wrap(err)

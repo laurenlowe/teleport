@@ -24,6 +24,7 @@ package reversetunnel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -36,6 +37,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/gravitational/teleport/api/constants"
+	"github.com/gravitational/teleport/api/defaults"
 	tracessh "github.com/gravitational/teleport/api/observability/tracing/ssh"
 	"github.com/gravitational/teleport/api/utils/sshutils"
 	"github.com/gravitational/teleport/lib/multiplexer"
@@ -98,6 +100,9 @@ type agentConfig struct {
 	addr utils.NetAddr
 	// keepAlive is the interval at which the agent will send heartbeats.
 	keepAlive time.Duration
+	// heartbeatTimeout is the timeout for server heartbeat responses.
+	// By default this is set to [defaults.DefaultIOTimeout].
+	heartbeatTimeout time.Duration
 	// stateCallback is called each time the state changes.
 	stateCallback AgentStateCallback
 	// sshDialer creates a new ssh connection.
@@ -120,6 +125,8 @@ type agentConfig struct {
 	localAuthAddresses []string
 	// proxySigner is used to sign PROXY headers for securely propagating client IP address
 	proxySigner multiplexer.PROXYHeaderSigner
+	// heartbeatTimeoutDisabled is true if heartbeat timeouts are disabled.
+	heartbeatTimeoutDisabled bool
 }
 
 // checkAndSetDefaults ensures an agentConfig contains required parameters.
@@ -148,6 +155,9 @@ func (c *agentConfig) checkAndSetDefaults() error {
 	if c.logger == nil {
 		c.logger = slog.Default()
 	}
+	if c.heartbeatTimeout == 0 {
+		c.heartbeatTimeout = defaults.DefaultIOTimeout
+	}
 	c.logger = c.logger.With(
 		"lease_id", c.lease.ID(),
 		"target", c.addr.String(),
@@ -172,6 +182,8 @@ type agent struct {
 	doneConnecting chan struct{}
 	// hbChannel is the channel heartbeats are sent over.
 	hbChannel *tracessh.Channel
+	// srvSupportsHbV2 is true if the server supports heartbeat V2.
+	srvSupportsHbV2 bool
 	// discoveryC receives new discovery channels.
 	discoveryC <-chan ssh.NewChannel
 	// transportC receives new tranport channels.
@@ -403,20 +415,93 @@ func (a *agent) connect() error {
 	return nil
 }
 
+// sendHeartbeatWithTimeout sends a ping message to the configured heartbeat channel with a timeout.
+func (a *agent) sendHeartbeatWithTimeout(ctx context.Context, timeout time.Duration) error {
+	errorCh := make(chan error, 1)
+	bytes, _ := a.clock.Now().UTC().MarshalText()
+
+	go func() {
+		_, err := a.hbChannel.SendRequest(ctx, "ping", true, bytes)
+		errorCh <- err
+	}()
+
+	select {
+	case err := <-errorCh:
+		return trace.Wrap(err)
+	case <-time.After(timeout):
+		return trace.ConnectionProblem(nil, "no reply to heartbeat")
+	case <-ctx.Done():
+		return trace.Wrap(ctx.Err())
+	}
+}
+
+// sendHeartbeat sends a ping message to the configured heartbeat channel.
+// The agent will wait for server reply if timeout is configured and the server supports it.
+func (a *agent) sendHeartbeat(ctx context.Context) error {
+	if a.srvSupportsHbV2 && !a.heartbeatTimeoutDisabled {
+		return trace.Wrap(a.sendHeartbeatWithTimeout(ctx, a.heartbeatTimeout))
+	}
+
+	bytes, _ := a.clock.Now().UTC().MarshalText()
+	_, err := a.hbChannel.SendRequest(ctx, "ping", false, bytes)
+	return trace.Wrap(err)
+}
+
+// isUnknownChannelType returns true if the error indicates the channel type is unsupported.
+func isUnknownChannelType(err error) bool {
+	var openErr *ssh.OpenChannelError
+
+	if errors.As(err, &openErr) {
+		// Server sends `ssh.ConnectionFailed` on unknown channels, this should be a `ssh.UnknownChannelType`
+		// so check for both as valid reasons to attempt the fallback path.
+		return openErr.Reason == ssh.ConnectionFailed ||
+			openErr.Reason == ssh.UnknownChannelType
+	}
+
+	return false
+}
+
+// openHeartbeatChannel attempts to open heartbeat channel V2 first and falls back to V1.
+func (a *agent) openHeartbeatChannel(ctx context.Context) (bool, *tracessh.Channel, <-chan *ssh.Request, error) {
+	var err1, err2 error
+	var supportsV2 bool
+
+	channel, requests, err1 := a.client.OpenChannel(ctx, chanHeartbeatV2, nil)
+	if err1 != nil {
+		// Check if server responds with unknown channel type meaning V2 is not supported.
+		if !isUnknownChannelType(err1) {
+			// Return unhandled errors.
+			return supportsV2, nil, nil, trace.Wrap(err1)
+		}
+
+		a.logger.DebugContext(ctx, "heartbeat v2 not supported, attempting fallback to v1")
+		channel, requests, err2 = a.client.OpenChannel(ctx, chanHeartbeat, nil)
+		if err2 != nil {
+			return supportsV2, nil, nil, trace.NewAggregate(err1, err2)
+		}
+	} else {
+		supportsV2 = true
+	}
+
+	return supportsV2, channel, requests, nil
+}
+
 // sendFirstHeartbeat opens the heartbeat channel and sends the first
 // heartbeat.
 func (a *agent) sendFirstHeartbeat(ctx context.Context) error {
-	channel, requests, err := a.client.OpenChannel(ctx, chanHeartbeat, nil)
+	supportsV2, channel, requests, err := a.openHeartbeatChannel(ctx)
 	if err != nil {
 		return trace.Wrap(err)
 	}
+
 	sshutils.DiscardChannelData(channel)
 	go ssh.DiscardRequests(requests)
 
 	a.hbChannel = channel
+	a.srvSupportsHbV2 = supportsV2
 
 	// Send the first ping right away.
-	if _, err := a.hbChannel.SendRequest(ctx, "ping", false, nil); err != nil {
+	if err := a.sendHeartbeat(ctx); err != nil {
 		return trace.Wrap(err)
 	}
 
@@ -525,9 +610,7 @@ func (a *agent) handleDrainChannels(drainWGDone func()) error {
 			if a.drainCtx.Err() != nil {
 				continue
 			}
-			bytes, _ := a.clock.Now().UTC().MarshalText()
-			_, err := a.hbChannel.SendRequest(a.ctx, "ping", false, bytes)
-			if err != nil {
+			if err := a.sendHeartbeat(a.ctx); err != nil {
 				a.logger.ErrorContext(a.ctx, "failed to send ping request", "error", err)
 				return trace.Wrap(err)
 			}
@@ -635,6 +718,7 @@ func (a *agent) handleDiscovery(ch ssh.Channel, reqC <-chan *ssh.Request) {
 
 const (
 	chanHeartbeat    = "teleport-heartbeat"
+	chanHeartbeatV2  = "teleport-heartbeat-v2"
 	chanDiscovery    = "teleport-discovery"
 	chanDiscoveryReq = "discovery"
 	reconnectRequest = "reconnect@goteleport.com"

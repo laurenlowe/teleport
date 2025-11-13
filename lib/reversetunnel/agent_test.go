@@ -27,15 +27,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gravitational/trace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/gravitational/teleport"
+	"github.com/gravitational/teleport/api/defaults"
 	tracessh "github.com/gravitational/teleport/api/observability/tracing/ssh"
-	"github.com/gravitational/teleport/api/utils/sshutils"
+	"github.com/gravitational/teleport/api/types"
+	apisshutils "github.com/gravitational/teleport/api/utils/sshutils"
+	"github.com/gravitational/teleport/lib/cryptosuites"
 	"github.com/gravitational/teleport/lib/reversetunnel/track"
+	"github.com/gravitational/teleport/lib/sshutils"
 	"github.com/gravitational/teleport/lib/utils"
 )
 
@@ -142,7 +147,7 @@ type mockAgentInjection struct {
 	client SSHClient
 }
 
-func (m *mockAgentInjection) handleTransport(context.Context, ssh.Channel, <-chan *ssh.Request, sshutils.Conn) {
+func (m *mockAgentInjection) handleTransport(context.Context, ssh.Channel, <-chan *ssh.Request, apisshutils.Conn) {
 }
 
 func (m *mockAgentInjection) DialContext(context.Context, utils.NetAddr) (SSHClient, error) {
@@ -153,16 +158,20 @@ func (m *mockAgentInjection) getVersion(context.Context) (string, error) {
 	return teleport.Version, nil
 }
 
-func testAgent(t *testing.T) (*agent, *mockSSHClient) {
-	tracker, err := track.New(track.Config{
-		ClusterName: "test",
-	})
-	require.NoError(t, err)
+func testAgent(t *testing.T, config agentConfig) (*agent, *mockSSHClient) {
+	var err error
 
-	addr := utils.NetAddr{Addr: "test-proxy-addr"}
+	if config.tracker == nil {
+		config.tracker, err = track.New(track.Config{
+			ClusterName: "test",
+		})
+		require.NoError(t, err)
+	}
 
-	lease := tracker.TryAcquire()
-	require.NotNil(t, lease)
+	config.addr = utils.NetAddr{Addr: "test-proxy-addr"}
+
+	config.lease = config.tracker.TryAcquire()
+	require.NotNil(t, config.lease)
 
 	client := &mockSSHClient{
 		MockPrincipals:        []string{"default"},
@@ -174,15 +183,27 @@ func testAgent(t *testing.T) (*agent, *mockSSHClient) {
 		client: client,
 	}
 
-	agent, err := newAgent(agentConfig{
-		keepAlive:        time.Millisecond * 100,
-		addr:             addr,
-		transportHandler: inject,
-		sshDialer:        inject,
-		versionGetter:    inject,
-		tracker:          tracker,
-		lease:            lease,
-	})
+	if config.transportHandler == nil {
+		config.transportHandler = inject
+	}
+
+	if config.sshDialer == nil {
+		config.sshDialer = inject
+	}
+
+	if config.versionGetter == nil {
+		config.versionGetter = inject
+	}
+
+	if config.keepAlive == 0 {
+		config.keepAlive = time.Millisecond * 100
+	}
+
+	if config.heartbeatTimeout == 0 {
+		config.heartbeatTimeout = defaults.DefaultIOTimeout
+	}
+
+	agent, err := newAgent(config)
 	require.NoError(t, err, "Unexpected error during agent construction.")
 
 	return agent, client
@@ -234,7 +255,7 @@ func (c *callbackCounter) waitForCount(t *testing.T, count int) {
 
 // TestAgentFailedToClaimLease tests that an agent fails when it cannot claim a lease.
 func TestAgentFailedToClaimLease(t *testing.T) {
-	agent, client := testAgent(t)
+	agent, client := testAgent(t, agentConfig{})
 	claimedProxy := "claimed-proxy"
 
 	callback := newCallback()
@@ -264,79 +285,157 @@ func TestAgentFailedToClaimLease(t *testing.T) {
 
 // TestAgentStart tests an agent performs the necessary actions during startup.
 func TestAgentStart(t *testing.T) {
-	agent, client := testAgent(t)
+	tests := []struct {
+		name            string // description of this test case
+		config          agentConfig
+		srvSupportsHbV2 bool
+		timeoutOnNth    int // Number of pings after the server times out, 0 == no timeouts
+	}{
 
-	callback := newCallback()
-	agent.stateCallback = callback.callback
-
-	openChannels := new(int32)
-	sentPings := new(int32)
-	versionReplies := new(int32)
-
-	waitForVersion := make(chan struct{})
-	go func() {
-		client.MockGlobalRequests <- &ssh.Request{
-			Type: versionRequest,
-		}
-	}()
-
-	client.MockOpenChannel = func(ctx context.Context, name string, data []byte) (*tracessh.Channel, <-chan *ssh.Request, error) {
-		// Block until the version request is handled to ensure we handle
-		// global requests during startup.
-		<-waitForVersion
-
-		atomic.AddInt32(openChannels, 1)
-		assert.Equal(t, chanHeartbeat, name, "Unexpected channel opened during startup.")
-		return tracessh.NewTraceChannel(
-				&mockSSHChannel{
-					MockSendRequest: func(name string, wantReply bool, payload []byte) (bool, error) {
-						atomic.AddInt32(sentPings, 1)
-
-						assert.Equal(t, "ping", name, "Unexpected request name.")
-						assert.False(t, wantReply, "Expected no reply wanted.")
-						return true, nil
-					},
-				},
-			),
-			make(<-chan *ssh.Request),
-			nil
+		{
+			name:            "V2 supported",
+			srvSupportsHbV2: true,
+		},
+		{
+			name:            "V2 supported and disabled by env",
+			srvSupportsHbV2: true,
+			config: agentConfig{
+				heartbeatTimeoutDisabled: true,
+			},
+		},
+		{
+			name:            "V2 not supported",
+			srvSupportsHbV2: false,
+		},
+		{
+			name: "V2 not supported env disable has no effect",
+			config: agentConfig{
+				heartbeatTimeoutDisabled: true,
+			},
+		},
+		{
+			name:            "heartbeat timeout on first ping",
+			srvSupportsHbV2: true,
+			timeoutOnNth:    1,
+		},
+		{
+			name:            "heartbeat timeout on 3rd ping",
+			srvSupportsHbV2: true,
+			timeoutOnNth:    4,
+		},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agent, client := testAgent(t, tt.config)
 
-	client.MockReply = func(r *ssh.Request, b1 bool, b2 []byte) error {
-		atomic.AddInt32(versionReplies, 1)
+			callback := newCallback()
+			agent.stateCallback = callback.callback
 
-		// Unblock once we receive a version reply.
-		close(waitForVersion)
+			openChannels := new(int32)
+			sentPings := new(int32)
+			versionReplies := new(int32)
 
-		assert.Equal(t, versionRequest, r.Type, "Unexpected request type.")
-		assert.Equal(t, teleport.Version, string(b2), "Unexpected version.")
-		return nil
+			waitForVersion := make(chan struct{})
+			go func() {
+				client.MockGlobalRequests <- &ssh.Request{
+					Type: versionRequest,
+				}
+			}()
+
+			client.MockOpenChannel = func(ctx context.Context, name string, data []byte) (*tracessh.Channel, <-chan *ssh.Request, error) {
+				// Block until the version request is handled to ensure we handle
+				// global requests during startup.
+				<-waitForVersion
+
+				switch name {
+				case chanHeartbeatV2:
+					if !tt.srvSupportsHbV2 {
+						return nil, nil, &ssh.OpenChannelError{Reason: ssh.UnknownChannelType}
+					}
+				case chanHeartbeat:
+				default:
+					assert.Fail(t, "unexpected channel name", name)
+				}
+
+				atomic.AddInt32(openChannels, 1)
+				return tracessh.NewTraceChannel(
+						&mockSSHChannel{
+							MockSendRequest: func(name string, wantReply bool, payload []byte) (bool, error) {
+								atomic.AddInt32(sentPings, 1)
+								if !tt.srvSupportsHbV2 || tt.config.heartbeatTimeoutDisabled {
+									assert.False(t, wantReply, "Expected no reply wanted.")
+								} else {
+									assert.True(t, wantReply, "Expected reply wanted.")
+								}
+								assert.Equal(t, "ping", name, "Unexpected request name.")
+
+								if atomic.LoadInt32(sentPings) == int32(tt.timeoutOnNth) {
+									return false, trace.ConnectionProblem(nil, "no reply to heartbeat")
+								}
+
+								return false, nil
+							},
+						},
+					),
+					make(<-chan *ssh.Request),
+					nil
+			}
+
+			client.MockReply = func(r *ssh.Request, b1 bool, b2 []byte) error {
+				atomic.AddInt32(versionReplies, 1)
+
+				// Unblock once we receive a version reply.
+				close(waitForVersion)
+
+				assert.Equal(t, versionRequest, r.Type, "Unexpected request type.")
+				assert.Equal(t, teleport.Version, string(b2), "Unexpected version.")
+				return nil
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			switch {
+			case tt.timeoutOnNth == 0:
+				err := agent.Start(ctx)
+				require.NoError(t, err)
+				require.Equal(t, 1, int(atomic.LoadInt32(openChannels)), "Expected only heartbeat channel to be opened.")
+				require.GreaterOrEqual(t, 1, int(atomic.LoadInt32(sentPings)), "Expected at least 1 ping to be sent.")
+				require.Equal(t, 1, int(atomic.LoadInt32(versionReplies)), "Expected 1 version reply.")
+				callback.waitForCount(t, 2)
+				require.Contains(t, callback.states, AgentConnecting)
+				require.Contains(t, callback.states, AgentConnected)
+				require.Equal(t, 2, callback.calls, "Unexpected number of state changes.")
+				require.Equal(t, AgentConnected, agent.GetState())
+
+				err = agent.Stop()
+				require.NoError(t, err)
+				require.True(t, agent.lease.IsReleased(), "Expected lease to be released.")
+
+				callback.waitForCount(t, 3)
+				require.Contains(t, callback.states, AgentClosed)
+				require.Equal(t, 3, callback.calls, "Unexpected number of state changes.")
+				require.Equal(t, AgentClosed, agent.GetState())
+			case tt.timeoutOnNth == 1:
+				// special case, connect fails on the very first connection
+				err := agent.Start(ctx)
+				require.Error(t, err)
+				require.True(t, trace.IsConnectionProblem(err))
+
+			case tt.timeoutOnNth > 1:
+				err := agent.Start(ctx)
+				require.NoError(t, err)
+				require.Equal(t, 1, int(atomic.LoadInt32(openChannels)), "Expected only heartbeat channel to be opened.")
+				require.GreaterOrEqual(t, tt.timeoutOnNth-1, int(atomic.LoadInt32(sentPings)), "Expected at least (tt.timeoutOnNth-1) ping(s) to be sent.")
+				require.Equal(t, 1, int(atomic.LoadInt32(versionReplies)), "Expected 1 version reply.")
+				callback.waitForCount(t, 3)
+				require.Contains(t, callback.states, AgentConnecting)
+				require.Contains(t, callback.states, AgentConnected)
+				require.Contains(t, callback.states, AgentClosed)
+				require.Equal(t, 3, callback.calls, "Unexpected number of state changes.")
+				require.Equal(t, AgentClosed, agent.GetState()) // timeout closes the agent
+			}
+		})
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-
-	err := agent.Start(ctx)
-
-	require.NoError(t, err)
-	require.Equal(t, 1, int(atomic.LoadInt32(openChannels)), "Expected only heartbeat channel to be opened.")
-	require.GreaterOrEqual(t, 1, int(atomic.LoadInt32(sentPings)), "Expected at least 1 ping to be sent.")
-	require.Equal(t, 1, int(atomic.LoadInt32(versionReplies)), "Expected 1 version reply.")
-
-	callback.waitForCount(t, 2)
-	require.Contains(t, callback.states, AgentConnecting)
-	require.Contains(t, callback.states, AgentConnected)
-	require.Equal(t, 2, callback.calls, "Unexpected number of state changes.")
-	require.Equal(t, AgentConnected, agent.GetState())
-
-	err = agent.Stop()
-	require.NoError(t, err)
-	require.True(t, agent.lease.IsReleased(), "Expected lease to be released.")
-
-	callback.waitForCount(t, 3)
-	require.Contains(t, callback.states, AgentClosed)
-	require.Equal(t, 3, callback.calls, "Unexpected number of state changes.")
-	require.Equal(t, AgentClosed, agent.GetState())
 }
 
 func TestAgentStateTransitions(t *testing.T) {
@@ -366,7 +465,7 @@ func TestAgentStateTransitions(t *testing.T) {
 		},
 	}
 
-	agent, _ := testAgent(t)
+	agent, _ := testAgent(t, agentConfig{})
 	for _, tc := range tests {
 		msg := "failed testing agent state %s -> %s"
 		for _, state := range tc.noError {
@@ -381,4 +480,238 @@ func TestAgentStateTransitions(t *testing.T) {
 			require.Error(t, err, msg, tc.start, state)
 		}
 	}
+}
+
+type mockHeartbeatInstance struct {
+	sshServer             *sshutils.Server
+	supportsV2            bool
+	doNotReplyToHeartbeat atomic.Bool
+	heartbeatV1Counter    atomic.Int64
+	heartbeatV2Counter    atomic.Int64
+	t                     *testing.T
+}
+
+func (m *mockHeartbeatInstance) Start() error {
+	return trace.Wrap(m.sshServer.Start())
+}
+
+func (m *mockHeartbeatInstance) Stop() {
+	m.sshServer.Close()
+}
+
+func (m *mockHeartbeatInstance) HandleNewChan(ctx context.Context, ccx *sshutils.ConnectionContext, nch ssh.NewChannel) {
+	conn := ccx.NetConn
+	sconn := ccx.ServerConn
+
+	switch nch.ChannelType() {
+	case chanHeartbeatV2:
+		if !m.supportsV2 {
+			nch.Reject(ssh.UnknownChannelType, "rejected")
+			return
+		}
+		go m.handleHeartbeat(ctx, conn, sconn, nch)
+	case chanHeartbeat:
+		go m.handleHeartbeat(ctx, conn, sconn, nch)
+	default:
+		nch.Reject(ssh.UnknownChannelType, "rejected")
+	}
+}
+
+func (m *mockHeartbeatInstance) handleHeartbeat(ctx context.Context, conn net.Conn, sconn *ssh.ServerConn, nch ssh.NewChannel) {
+	ch, req, err := nch.Accept()
+	assert.NoError(m.t, err, "Failed to accept channel")
+
+	if err != nil {
+		conn.Close()
+		return
+	}
+
+	apisshutils.DiscardChannelData(ch)
+	if ch != nil {
+		defer func() {
+			ch.Close()
+		}()
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case r, ok := <-req:
+			if !ok {
+				return
+			}
+
+			switch nch.ChannelType() {
+			case chanHeartbeatV2:
+				if r.WantReply && !m.doNotReplyToHeartbeat.Load() {
+					r.Reply(true, nil)
+				}
+				m.heartbeatV2Counter.Add(1)
+			case chanHeartbeat:
+				m.heartbeatV1Counter.Add(1)
+			default:
+			}
+
+		}
+	}
+}
+
+func setupMockServerAndAgent(t *testing.T, tt *testAgentTimeoutCase) (*mockHeartbeatInstance, Agent) {
+	t.Helper()
+	ctx := t.Context()
+	ca, err := apisshutils.MakeTestSSHCA()
+	require.NoError(t, err)
+	cert, err := apisshutils.MakeRealHostCert(ca)
+	require.NoError(t, err)
+
+	mock := &mockHeartbeatInstance{
+		t:          t,
+		supportsV2: tt.supportsV2,
+	}
+
+	sshServer, err := sshutils.NewServer(
+		"test",
+		utils.NetAddr{AddrNetwork: "tcp", Addr: "127.0.0.1:0"},
+		mock,
+		sshutils.StaticHostSigners(cert),
+		sshutils.AuthMethods{NoClient: true},
+		sshutils.SetInsecureSkipHostValidation(),
+	)
+	require.NoError(t, err)
+
+	mock.sshServer = sshServer
+	require.NoError(t, sshServer.Start()) // Start here to obtain the port for the resolver.
+
+	priv, err := cryptosuites.GenerateKeyWithAlgorithm(cryptosuites.Ed25519)
+	require.NoError(t, err)
+
+	signer, err := ssh.NewSignerFromKey(priv)
+	require.NoError(t, err)
+
+	resolver := func(context.Context) (*utils.NetAddr, types.ProxyListenerMode, error) {
+		return utils.MustParseAddr(sshServer.Addr()), types.ProxyListenerMode_Multiplex, nil
+	}
+
+	pool, err := NewAgentPool(ctx, AgentPoolConfig{
+		Resolver:                 resolver,
+		Client:                   &mockLocalClusterClient{},
+		AccessPoint:              &fakeClient{caKey: ca.PublicKey()},
+		Cluster:                  "test",
+		AuthMethods:              []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostUUID:                 uuid.NewString(),
+		HeartbeatTimeout:         tt.heartbeatTimeout,
+		HeartbeatTimeoutDisabled: tt.heartbeatTimeoutDisabled,
+	})
+	require.NoError(t, err)
+
+	pool.runtimeConfig.keepAliveInterval = tt.keepAliveInterval
+
+	tracker, err := track.New(track.Config{ClusterName: "test"})
+	require.NoError(t, err)
+
+	lease := tracker.TryAcquire()
+	require.NotNil(t, lease)
+
+	agent, err := pool.newAgent(ctx, tracker, lease)
+	require.NoError(t, err)
+
+	return mock, agent
+}
+
+type testAgentTimeoutCase struct {
+	name                     string
+	supportsV2               bool
+	heartbeatTimeoutDisabled bool
+	heartbeatTimeout         time.Duration
+	keepAliveInterval        time.Duration
+	postConnectFn            func(*testing.T, *mockHeartbeatInstance, Agent)
+	postFailureFn            func(*testing.T, *mockHeartbeatInstance, Agent)
+}
+
+// TestAgentTimeout runs an agent against a mock SSH server and ensures that
+// heartbeats time out as expected when the server does not respond.
+func TestAgentTimeout(t *testing.T) {
+	t.Parallel()
+	cases := []testAgentTimeoutCase{
+		{
+			name:              "server supports V2",
+			supportsV2:        true,
+			heartbeatTimeout:  20 * time.Millisecond,
+			keepAliveInterval: 100 * time.Millisecond,
+			postConnectFn: func(t *testing.T, mock *mockHeartbeatInstance, a Agent) {
+				require.Equal(t, AgentConnected, a.GetState())
+				require.EventuallyWithT(t, func(collect *assert.CollectT) {
+					assert.GreaterOrEqual(collect, mock.heartbeatV2Counter.Load(), int64(2))
+				}, 1*time.Second, 50*time.Millisecond, "Expected at least 2 V2 heartbeats to be received.")
+				assert.Zero(t, mock.heartbeatV1Counter.Load(), "Expected no heartbeats over V1 channel")
+			},
+			postFailureFn: func(t *testing.T, _ *mockHeartbeatInstance, a Agent) {
+				require.EventuallyWithT(t, func(collect *assert.CollectT) {
+					assert.Equal(collect, AgentClosed, a.GetState())
+				}, 1*time.Second, 50*time.Millisecond, "Expected agent to enter disconnected state after heartbeat timeout.")
+			},
+		},
+		{
+			name:                     "server supports V2 but env override set",
+			supportsV2:               true,
+			heartbeatTimeoutDisabled: true,
+			heartbeatTimeout:         20 * time.Millisecond,
+			keepAliveInterval:        100 * time.Millisecond,
+			postConnectFn: func(t *testing.T, mock *mockHeartbeatInstance, a Agent) {
+				require.Equal(t, AgentConnected, a.GetState())
+				require.EventuallyWithT(t, func(collect *assert.CollectT) {
+					assert.GreaterOrEqual(collect, mock.heartbeatV2Counter.Load(), int64(2))
+				}, 1*time.Second, 50*time.Millisecond, "Expected at least 2 V2 heartbeats to be received.")
+				assert.Zero(t, mock.heartbeatV1Counter.Load(), "Expected no heartbeats over V1 channel")
+			},
+			postFailureFn: func(t *testing.T, mock *mockHeartbeatInstance, a Agent) {
+				count := mock.heartbeatV2Counter.Load()
+				require.EventuallyWithT(t, func(collect *assert.CollectT) {
+					assert.GreaterOrEqual(collect, mock.heartbeatV2Counter.Load(), count+2)
+				}, 1*time.Second, 50*time.Millisecond, "Expected at least 2 more V2 heartbeats to be received.")
+				require.Equal(t, AgentConnected, a.GetState(), "Expected agent to remain connected.")
+			},
+		},
+		{
+			name:              "server does not support V2",
+			supportsV2:        false,
+			heartbeatTimeout:  20 * time.Millisecond,
+			keepAliveInterval: 100 * time.Millisecond,
+			postConnectFn: func(t *testing.T, mock *mockHeartbeatInstance, a Agent) {
+				require.Equal(t, AgentConnected, a.GetState())
+				require.EventuallyWithT(t, func(collect *assert.CollectT) {
+					assert.GreaterOrEqual(collect, mock.heartbeatV1Counter.Load(), int64(2))
+				}, 1*time.Second, 50*time.Millisecond, "Expected at least 2 V1 heartbeats to be received.")
+				assert.Zero(t, mock.heartbeatV2Counter.Load(), "Expected no heartbeats over V2 channel")
+			},
+			postFailureFn: func(t *testing.T, mock *mockHeartbeatInstance, a Agent) {
+				count := mock.heartbeatV1Counter.Load()
+				require.EventuallyWithT(t, func(collect *assert.CollectT) {
+					assert.GreaterOrEqual(collect, mock.heartbeatV1Counter.Load(), count+2)
+				}, 1*time.Second, 50*time.Millisecond, "Expected at least 2 more V1 heartbeats to be received.")
+				require.Equal(t, AgentConnected, a.GetState(), "Expected agent to remain connected.")
+			},
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			mock, agent := setupMockServerAndAgent(t, &tt)
+			require.NoError(t, mock.Start())
+			t.Cleanup(func() { mock.Stop() })
+
+			require.NoError(t, agent.Start(ctx))
+			t.Cleanup(func() { agent.Stop() })
+
+			// Wait for some successful heartbeats to be received.
+			tt.postConnectFn(t, mock, agent)
+			// Inject failure to respond to heartbeats.
+			mock.doNotReplyToHeartbeat.Store(true)
+			tt.postFailureFn(t, mock, agent)
+
+		})
+	}
+
 }

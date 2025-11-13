@@ -675,7 +675,7 @@ func (s *server) HandleNewChan(ctx context.Context, ccx *sshutils.ConnectionCont
 	channelType := nch.ChannelType()
 	switch channelType {
 	// Heartbeats can come from nodes or proxies.
-	case chanHeartbeat:
+	case chanHeartbeat, chanHeartbeatV2:
 		s.handleHeartbeat(ctx, conn, sconn, nch)
 	// Transport requests come from nodes requesting a connection to the Auth
 	// Server through the reverse tunnel.
