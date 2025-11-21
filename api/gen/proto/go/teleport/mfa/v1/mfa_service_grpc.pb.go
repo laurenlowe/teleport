@@ -13,9 +13,9 @@
 // versions:
 // - protoc-gen-go-grpc v1.5.1
 // - protoc             (unknown)
-// source: teleport/mfa/v2/mfa_service.proto
+// source: teleport/mfa/v1/mfa_service.proto
 
-package mfav2
+package mfav1
 
 import (
 	context "context"
@@ -30,10 +30,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	MFAService_CreateChallenge_FullMethodName                = "/teleport.mfa.v2.MFAService/CreateChallenge"
-	MFAService_ValidateChallenge_FullMethodName              = "/teleport.mfa.v2.MFAService/ValidateChallenge"
-	MFAService_ReplicateValidatedMFAChallenge_FullMethodName = "/teleport.mfa.v2.MFAService/ReplicateValidatedMFAChallenge"
-	MFAService_VerifyValidatedMFAChallenge_FullMethodName    = "/teleport.mfa.v2.MFAService/VerifyValidatedMFAChallenge"
+	MFAService_CreateChallenge_FullMethodName                = "/teleport.mfa.v1.MFAService/CreateChallenge"
+	MFAService_ValidateChallenge_FullMethodName              = "/teleport.mfa.v1.MFAService/ValidateChallenge"
+	MFAService_ReplicateValidatedMFAChallenge_FullMethodName = "/teleport.mfa.v1.MFAService/ReplicateValidatedMFAChallenge"
+	MFAService_VerifyValidatedMFAChallenge_FullMethodName    = "/teleport.mfa.v1.MFAService/VerifyValidatedMFAChallenge"
 )
 
 // MFAServiceClient is the client API for MFAService service.
@@ -109,7 +109,7 @@ func (c *mFAServiceClient) VerifyValidatedMFAChallenge(ctx context.Context, in *
 }
 
 // MFAServiceServer is the server API for MFAService service.
-// All implementations must embed UnimplementedMFAServiceServer
+// All implementations should embed UnimplementedMFAServiceServer
 // for forward compatibility.
 //
 // MFAService defines the Multi-Factor Authentication (MFA) service. While this service is currently focused on user
@@ -130,10 +130,9 @@ type MFAServiceServer interface {
 	// The payload is used to verify the challenge is tied to the correct user session. If the verification is successful,
 	// the MFA device used for authentication is returned. If the verification fails, an error is returned.
 	VerifyValidatedMFAChallenge(context.Context, *VerifyValidatedMFAChallengeRequest) (*VerifyValidatedMFAChallengeResponse, error)
-	mustEmbedUnimplementedMFAServiceServer()
 }
 
-// UnimplementedMFAServiceServer must be embedded to have
+// UnimplementedMFAServiceServer should be embedded to have
 // forward compatible implementations.
 //
 // NOTE: this should be embedded by value instead of pointer to avoid a nil
@@ -152,8 +151,7 @@ func (UnimplementedMFAServiceServer) ReplicateValidatedMFAChallenge(context.Cont
 func (UnimplementedMFAServiceServer) VerifyValidatedMFAChallenge(context.Context, *VerifyValidatedMFAChallengeRequest) (*VerifyValidatedMFAChallengeResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method VerifyValidatedMFAChallenge not implemented")
 }
-func (UnimplementedMFAServiceServer) mustEmbedUnimplementedMFAServiceServer() {}
-func (UnimplementedMFAServiceServer) testEmbeddedByValue()                    {}
+func (UnimplementedMFAServiceServer) testEmbeddedByValue() {}
 
 // UnsafeMFAServiceServer may be embedded to opt out of forward compatibility for this service.
 // Use of this interface is not recommended, as added methods to MFAServiceServer will
@@ -249,7 +247,7 @@ func _MFAService_VerifyValidatedMFAChallenge_Handler(srv interface{}, ctx contex
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var MFAService_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "teleport.mfa.v2.MFAService",
+	ServiceName: "teleport.mfa.v1.MFAService",
 	HandlerType: (*MFAServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
@@ -270,5 +268,5 @@ var MFAService_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "teleport/mfa/v2/mfa_service.proto",
+	Metadata: "teleport/mfa/v1/mfa_service.proto",
 }
