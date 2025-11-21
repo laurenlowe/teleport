@@ -1589,6 +1589,18 @@ func applyDiscoveryConfig(fc *FileConfig, cfg *servicecfg.Config) error {
 			}
 		}
 
+		var accountsMatcher *types.AWSAccountsMatcher
+		if matcher.Accounts != nil {
+			accountsMatcher = &types.AWSAccountsMatcher{
+				Include: &types.AWSAccountsRule{
+					OU: matcher.Accounts.Include.OU,
+				},
+				Exclude: &types.AWSAccountsRule{
+					OU: matcher.Accounts.Exclude.OU,
+				},
+			}
+		}
+
 		serviceMatcher := types.AWSMatcher{
 			Types:             matcher.Types,
 			Regions:           matcher.Regions,
@@ -1599,6 +1611,8 @@ func applyDiscoveryConfig(fc *FileConfig, cfg *servicecfg.Config) error {
 			Integration:       matcher.Integration,
 			KubeAppDiscovery:  matcher.KubeAppDiscovery,
 			SetupAccessForARN: matcher.SetupAccessForARN,
+			OrganizationID:    matcher.OrganizationID,
+			Accounts:          accountsMatcher,
 		}
 		if err := serviceMatcher.CheckAndSetDefaults(); err != nil {
 			return trace.Wrap(err)

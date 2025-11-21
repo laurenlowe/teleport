@@ -1818,6 +1818,28 @@ type AWSMatcher struct {
 	KubeAppDiscovery bool `yaml:"kube_app_discovery"`
 	// SetupAccessForARN is the role that the discovery service should create EKS Access Entries for.
 	SetupAccessForARN string `yaml:"setup_access_for_arn"`
+	// OrganizationID is the AWS Organization ID to match.
+	OrganizationID string `yaml:"organization_id"`
+	// Accounts contains filter rules for matching AWS accounts under the OrganizationID.
+	Accounts *AWSAccountsMatcher `yaml:"accounts,omitempty"`
+}
+
+// AWSAccountsMatcher contains rules for matching AWS accounts under specific Organization Units.
+type AWSAccountsMatcher struct {
+	// Include contains rules for including AWS accounts.
+	Include AWSAccountsRule `yaml:"include,omitempty"`
+
+	// Exclude contains rules for excluding AWS accounts.
+	Exclude AWSAccountsRule `yaml:"exclude,omitempty"`
+}
+
+// AWSAccountsRule is a rule for AWS accounts under specific Organization Units.
+type AWSAccountsRule struct {
+	// OU is a list of AWS Organization Units to match.
+	// This field supports "glob-style" matching:
+	// - Use '*' to match zero or more characters.
+	// - Use '?' to match any single character.
+	OU []string `yaml:"ou,omitempty"`
 }
 
 // InstallParams sets join method to use on discovered nodes

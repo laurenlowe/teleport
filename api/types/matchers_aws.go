@@ -173,10 +173,17 @@ func (m *AWSMatcher) CheckAndSetDefaults() error {
 		}
 	}
 
+	if err := m.validOrganizationAccountDiscovery(); err != nil {
+		return trace.Wrap(err)
+	}
+
 	if m.AssumeRole != nil {
 		if m.AssumeRole.RoleARN != "" {
-			if err := awsapiutils.CheckRoleARN(m.AssumeRole.RoleARN); err != nil {
-				return trace.BadParameter("invalid assume role: %v", err)
+			// When discovering Accounts under an Organization, the Role is validated above.
+			if m.OrganizationID == "" {
+				if err := awsapiutils.CheckRoleARN(m.AssumeRole.RoleARN); err != nil {
+					return trace.BadParameter("invalid assume role: %v", err)
+				}
 			}
 		} else if m.AssumeRole.ExternalID != "" {
 			for _, t := range m.Types {
@@ -279,5 +286,30 @@ func (m *AWSMatcher) CheckAndSetDefaults() error {
 			m.SSM.DocumentName = AWSInstallerDocument
 		}
 	}
+	return nil
+}
+
+func (m *AWSMatcher) validOrganizationAccountDiscovery() error {
+	if m.OrganizationID == "" {
+		// If no organization is set, accounts filter cannot be set.
+		if m.Accounts != nil && (len(m.Accounts.Exclude.OU) > 0 || len(m.Accounts.Include.OU) > 0) {
+			return trace.BadParameter("organization id is required when using accounts filter")
+		}
+	}
+
+	if m.AssumeRole == nil || m.AssumeRole.RoleARN == "" {
+		return trace.BadParameter("assume role must be set to the role name when discovering accounts")
+	}
+
+	if err := awsapiutils.IsValidIAMRoleName(m.AssumeRole.RoleARN); err != nil {
+		return trace.BadParameter("assume role must be set to the role name when discovering accounts: %v", err)
+	}
+
+	// Only EC2 supports organization account discovery.
+	// TODO(marco): add support for other resources types.
+	if len(m.Types) > 1 || m.Types[0] != AWSMatcherEC2 {
+		return trace.BadParameter("only ec2 resource discovery is supported when discovering accounts")
+	}
+
 	return nil
 }
