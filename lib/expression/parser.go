@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/coreos/go-semver/semver"
 	"github.com/gravitational/trace"
 
 	"github.com/gravitational/teleport/lib/utils"
@@ -160,6 +161,11 @@ func DefaultParserSpec[evaluationEnv any]() typical.ParserSpec[evaluationEnv] {
 				func(s Set) (bool, error) {
 					return len(s.s) == 0, nil
 				}),
+			"semver.newer_than": typical.BinaryFunction[evaluationEnv](SemverGt),
+			"semver.older_than": typical.BinaryFunction[evaluationEnv](SemverLt),
+			"semver.between":    typical.TernaryFunction[evaluationEnv](SemverBetween),
+			"newer_than":        typical.BinaryFunction[evaluationEnv](SemverGt),
+			"older_than":        typical.BinaryFunction[evaluationEnv](SemverLt),
 		},
 		Methods: map[string]typical.Function{
 			"add": typical.BinaryVariadicFunction[evaluationEnv](
@@ -300,4 +306,72 @@ func choose(options ...option) (any, error) {
 type option struct {
 	condition bool
 	value     any
+}
+
+// SemverGt compares two semantic versions and returns true if a > b.
+func SemverGt(a, b any) (bool, error) {
+	va, err := ToSemver(a)
+	if va == nil || err != nil {
+		return false, err
+	}
+	vb, err := ToSemver(b)
+	if vb == nil || err != nil {
+		return false, err
+	}
+	return va.Compare(*vb) > 0, nil
+}
+
+// SemverLt compares two semantic versions and returns true if a < b.
+func SemverLt(a, b any) (bool, error) {
+	va, err := ToSemver(a)
+	if va == nil || err != nil {
+		return false, err
+	}
+	vb, err := ToSemver(b)
+	if vb == nil || err != nil {
+		return false, err
+	}
+	return va.Compare(*vb) < 0, nil
+}
+
+// SemverEq compares two semantic versions and returns true if a == b.
+func SemverEq(a, b any) (bool, error) {
+	va, err := ToSemver(a)
+	if va == nil || err != nil {
+		return false, err
+	}
+	vb, err := ToSemver(b)
+	if vb == nil || err != nil {
+		return false, err
+	}
+	return va.Compare(*vb) == 0, nil
+}
+
+// SemverBetween checks if c is between versions a and b (inclusive of a, exclusive of b).
+func SemverBetween(c, a, b any) (bool, error) {
+	gt, err := SemverGt(c, a)
+	if err != nil {
+		return false, err
+	}
+	eq, err := SemverEq(c, a)
+	if err != nil {
+		return false, err
+	}
+	lt, err := SemverLt(c, b)
+	if err != nil {
+		return false, err
+	}
+	return (gt || eq) && lt, nil
+}
+
+// ToSemver converts a value to a semantic version.
+func ToSemver(anyV any) (*semver.Version, error) {
+	switch v := anyV.(type) {
+	case *semver.Version:
+		return v, nil
+	case string:
+		return semver.NewVersion(v)
+	default:
+		return nil, trace.BadParameter("type %T cannot be parsed as semver.Version", v)
+	}
 }
