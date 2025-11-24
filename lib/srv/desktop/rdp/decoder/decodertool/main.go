@@ -1,0 +1,111 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"image"
+	"image/png"
+	"io"
+	"log"
+	"os"
+	"os/signal"
+
+	apievents "github.com/gravitational/teleport/api/types/events"
+	"github.com/gravitational/teleport/lib/events"
+	"github.com/gravitational/teleport/lib/srv/desktop/rdp/decoder"
+	"github.com/gravitational/teleport/lib/srv/desktop/tdp"
+)
+
+func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+
+	fname := os.Args[1]
+	f, err := os.Open(fname)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer f.Close()
+
+	pr := events.NewProtoReader(f, nil /* decrypter */)
+	defer pr.Close()
+
+	count := 0
+
+	rdpDecoder, err := decoder.New(uint16(19200), uint16(10800))
+	if err != nil {
+		log.Fatalf("couldn't create decoder: %v", err)
+	}
+
+	var width, height uint32
+
+	for {
+		evt, err := pr.Read(ctx)
+		if errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			log.Fatal(err)
+		}
+
+		count++
+
+		recordingEvent, ok := evt.(*apievents.DesktopRecording)
+		if !ok {
+			log.Printf("skipping %v event (%d)", evt.GetType(), count)
+			continue
+		}
+
+		msg, err := tdp.Decode(recordingEvent.Message)
+		if err != nil {
+			log.Println("failed to decode message, skipping it")
+			continue
+		}
+
+		switch msg := msg.(type) {
+		case tdp.ConnectionActivated:
+			width, height = uint32(msg.ScreenWidth), uint32(msg.ScreenHeight)
+
+		case tdp.ClientScreenSpec:
+			width, height = msg.Width, msg.Height
+			if rdpDecoder != nil {
+				rdpDecoder.Resize(uint16(msg.Width), uint16(msg.Height))
+			}
+
+		case tdp.RDPFastPathPDU:
+			if rdpDecoder == nil {
+				var err error
+				rdpDecoder, err = decoder.New(uint16(width), uint16(height))
+				if err != nil {
+					log.Fatalf("couldn't create decoder: %v", err)
+				}
+			}
+
+			rdpDecoder.Process([]byte(msg))
+
+			if count%100 == 0 {
+				writeImage(rdpDecoder.Image(), count)
+			}
+		}
+	}
+
+	writeImage(rdpDecoder.Image(), count)
+}
+
+func writeImage(img *image.RGBA, index int) error {
+	if img == nil {
+		return errors.New("nil image")
+	}
+	f, err := os.Create(fmt.Sprintf("screen-%d.png", index))
+	if err != nil {
+		return err
+	}
+
+	defer f.Close()
+
+	if err := png.Encode(f, img); err != nil {
+		return err
+	}
+
+	return nil
+}
