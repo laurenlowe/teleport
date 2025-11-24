@@ -5741,6 +5741,10 @@ message SAMLConnectorSpecV2 {
   // UserMatchers is a set of glob patterns to narrow down which username(s) this auth connector should
   // match for identifier-first login.
   repeated string UserMatchers = 20 [(gogoproto.jsontag) = "user_matchers,omitempty"];
+  // IncludeSubjectInAuthnRequest defines whether the <Subject> element is included in the a SAML
+  // AuthnRequest. Defaults to false.
+  // Note: Some IdPs will reject requests that contain a Subject.
+  bool IncludeSubjectInAuthnRequest = 21 [(gogoproto.jsontag) = "include_subject_in_authn_request,omitempty"];
 }
 
 // SAMLConnectorMFASettings contains SAML MFA settings.

@@ -123,6 +123,10 @@ type SAMLConnector interface {
 	// SetUserMatchers sets the set of glob patterns to narrow down which username(s) this auth connector should match
 	// for identifier-first login.
 	SetUserMatchers([]string)
+	// GetIncludeSubjectInAuthnRequest returns true if the Subject element should be included in the AuthnRequest.
+	GetIncludeSubjectInAuthnRequest() bool
+	// SetIncludeSubjectInAuthnRequest sets whether the Subject element should be included.
+	SetIncludeSubjectInAuthnRequest(bool)
 }
 
 // NewSAMLConnector returns a new SAMLConnector based off a name and SAMLConnectorSpecV2.
@@ -467,6 +471,14 @@ func (r *SAMLConnectorV2) GetUserMatchers() []string {
 // for identifier-first login.
 func (r *SAMLConnectorV2) SetUserMatchers(userMatchers []string) {
 	r.Spec.UserMatchers = userMatchers
+}
+
+func (r *SAMLConnectorV2) GetIncludeSubjectInAuthnRequest() bool {
+	return r.Spec.IncludeSubjectInAuthnRequest
+}
+
+func (r *SAMLConnectorV2) SetIncludeSubjectInAuthnRequest(includeSubject bool) {
+	r.Spec.IncludeSubjectInAuthnRequest = includeSubject
 }
 
 const (
