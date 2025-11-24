@@ -378,34 +378,19 @@ func IsAccessListMember(
 		}
 	}
 
-	filter, explain := validForUserFilter(user, clock.Now())
-	// newAccessPathVisitor provides a cycle-proof way of traversing the nested list hierarchy.
-	pathVisitor, err := newAccessPathVisitor(g, accessList, filter)
-	if err != nil {
-		return accesslistv1.AccessListUserAssignmentType_ACCESS_LIST_USER_ASSIGNMENT_TYPE_UNSPECIFIED, trace.Wrap(err, "fetching access list %q members", accessList.GetName())
-	}
-	for path, err := range pathVisitor.accessPaths(ctx) {
-		if err != nil {
-			return accesslistv1.AccessListUserAssignmentType_ACCESS_LIST_USER_ASSIGNMENT_TYPE_UNSPECIFIED, trace.Wrap(err)
-		}
-		// If the path is composed of only 2 components: the start list and
-		// the user membership, this is an explicit assignment.
-		// For example: ["my-list", "my-user"].
-		// We can do this check even when the visitor is doing depth-first
-		// traversal because it processes ever member before looking into nested
-		// lists.
-		if len(path) == 2 {
-			return accesslistv1.AccessListUserAssignmentType_ACCESS_LIST_USER_ASSIGNMENT_TYPE_EXPLICIT, nil
-		}
-
-		// Else the assignment is inherited through one or many levels of nested access lists.
-		// For example: ["my-list", "my-nested-list", "my-user"]
-		return accesslistv1.AccessListUserAssignmentType_ACCESS_LIST_USER_ASSIGNMENT_TYPE_INHERITED, nil
+	filter, getResult := walkUntilUser(user, clock.Now())
+	// newAccessWalkerConfig provides a cycle-proof way of traversing the nested list hierarchy.
+	cfg := walkConfig{
+		getter: g,
+		root:   accessList,
+		walkFn: filter,
 	}
 
-	// If we land here, no valid access paths were identified.
-	// To make troubleshooting easier, we optionally return a string explaining which access paths were filtered out.
-	return accesslistv1.AccessListUserAssignmentType_ACCESS_LIST_USER_ASSIGNMENT_TYPE_UNSPECIFIED, trace.AccessDenied("%s", explain())
+	if err := walk(ctx, cfg); err != nil {
+		return accesslistv1.AccessListUserAssignmentType_ACCESS_LIST_USER_ASSIGNMENT_TYPE_UNSPECIFIED, trace.Wrap(err, "walking the access list graph of %q", accessList.GetName())
+	}
+
+	return getResult()
 }
 
 // UserMeetsRequirements is a helper which will return whether the User meets the AccessList Ownership/MembershipRequires.
