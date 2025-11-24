@@ -35,43 +35,58 @@ import (
 // accessFilterFunc takes an access leg and returns true if it should be considered
 // when traversing the accesslist graph. When returning false, a reason can be
 // optionally specified. This helps troubleshooting access issues.
-type accessFilterFunc func(leg accessLeg) (bool, string)
+type accessFilterFunc func(path accessPath) bool
 
 // validForUserFilter returns an accessFilterFunc that filters out every invalid
 // accessLeg. Invalid access legs are:
 // - expired legs
 // - legs granting access to a different user
 // - legs granting access to a list whose requirements are not met by the user
-func validForUserFilter(user types.User, now time.Time) accessFilterFunc {
-	return func(leg accessLeg) (bool, string) {
+func validForUserFilter(user types.User, now time.Time) (accessFilterFunc, func() string) {
+	skipped := make([]skippedAccessPath, 0)
+	explain := func() string {
+		var sb strings.Builder
+		sb.WriteString("User is not member of the access list, directly or via nested list")
+		if len(skipped) == 0 {
+			return sb.String()
+		}
+		sb.WriteString("\nWhen resolving access, the following access paths were ignored:")
+		for _, path := range skipped {
+			sb.WriteString(fmt.Sprintf("\n * %q because %s", path, path.reason))
+		}
+		return sb.String()
+	}
+
+	return func(path accessPath) bool {
+		leg := path[len(path)-1]
 		if leg.member != nil {
-			// If the membership is for a user but the not the one we are looking for, we filter it out.
+			// If the membership is for a user but not the one we are looking for, we filter it out.
 			if leg.member.Spec.MembershipKind == accesslist.MembershipKindUser && leg.member.Spec.Name != user.GetName() {
-				return false, ""
+				return false
 			}
 			// If the membership is expired, it is invalid.
 			if !leg.member.Spec.Expires.IsZero() && !now.Before(leg.member.Spec.Expires) {
-				return false, "expired"
+				skipped = append(skipped, skippedAccessPath{path, "expired"})
+				return false
 			}
 		}
 
 		// If the member is a list but user doesn't meet the list's membership requirements, the leg is invalid.
 		if leg.list != nil && !UserMeetsRequirements(user, leg.list.Spec.MembershipRequires) {
-			return false, "did not meet list requirements"
+			skipped = append(skipped, skippedAccessPath{path, "did not meet list requirements"})
+			return false
 		}
 
-		return true, ""
-	}
+		return true
+	}, explain
 }
 
 // visitor visits all members of an AccessList graph by doing a depth-first traversal.
 // The visitor is cycle-proof.
 type visitor struct {
-	getter       AccessListAndMembersGetter
-	seen         map[string]struct{}
-	stack        []accessPath
-	filter       accessFilterFunc
-	skippedPaths []skippedAccessPath
+	getter AccessListAndMembersGetter
+	start  *accesslist.AccessList
+	filter accessFilterFunc
 }
 
 // accessPath represents a path in the access list graph from the start list to
@@ -130,45 +145,38 @@ func newAccessPathVisitor(
 		return nil, trace.BadParameter("accessList is required (this is a bug)")
 	}
 
-	stack := make([]accessPath, 0)
-	skipped := make([]skippedAccessPath, 0)
-	start := accessLeg{
-		list: accessList,
-	}
-
-	ok, reason := filter(start)
-	if ok {
-		stack = append(stack, accessPath{start})
-	} else if reason != "" {
-		// non-empty reason means we can silently skip the path
-		skipped = append(skipped, skippedAccessPath{accessPath{start}, reason})
-	}
-
 	return &visitor{
-		getter:       getter,
-		seen:         map[string]struct{}{accessList.GetName(): {}},
-		stack:        stack,
-		filter:       filter,
-		skippedPaths: skipped,
+		getter: getter,
+		start:  accessList,
+		filter: filter,
 	}, nil
 }
 
 // accessPaths returns an iterator yielding complete accessPaths meeting the
 // filter requirements. This does not exhaustively list every valid accessPath.
 // If several valid paths go through the same list, only one of them is yielded.
+// The iterator is doing a depth-first traversal of nested list, but will
+// process every member of an access-list before looking into nested lists.
 func (v *visitor) accessPaths(ctx context.Context) iter.Seq2[accessPath, error] {
+	stack := make([]accessPath, 0)
+	firstLeg := accessLeg{
+		list: v.start,
+	}
+
+	ok := v.filter(accessPath{firstLeg})
+	if ok {
+		stack = append(stack, accessPath{firstLeg})
+	}
+	seen := map[string]struct{}{v.start.GetName(): {}}
+
 	return func(yield func(accessPath, error) bool) {
 		var path accessPath
 		var list *accesslist.AccessList
 
 		// Walk the accesslist tree until we no longer have new nested access lists to visit
-		for {
-			if len(v.stack) == 0 {
-				return
-			}
-
+		for len(stack) != 0 {
 			// We take the accesslist on top of the stack
-			v.stack, path = v.stack[:len(v.stack)-1], v.stack[len(v.stack)-1]
+			stack, path = stack[:len(stack)-1], stack[len(stack)-1]
 			list = path[len(path)-1].list
 
 			var err error
@@ -193,7 +201,7 @@ func (v *visitor) accessPaths(ctx context.Context) iter.Seq2[accessPath, error] 
 					name := member.GetName()
 
 					// If we already have a valid path to this list, skip it.
-					if _, seen := v.seen[name]; seen {
+					if _, seen := seen[name]; seen {
 						continue
 					}
 
@@ -206,7 +214,7 @@ func (v *visitor) accessPaths(ctx context.Context) iter.Seq2[accessPath, error] 
 						// Gracefully handle the missing access list case,
 						// to avoid breaking everything in case of membership inconsistency.
 						if trace.IsNotFound(err) {
-							v.seen[name] = struct{}{}
+							seen[name] = struct{}{}
 							continue
 						}
 						yield(nil, trace.Wrap(err))
@@ -215,29 +223,21 @@ func (v *visitor) accessPaths(ctx context.Context) iter.Seq2[accessPath, error] 
 
 					// Check if the leg is valid
 					leg = accessLeg{member: member, list: nestedList}
-					if ok, reason := v.filter(leg); !ok {
-						// If the leg is not valid and user should be informed, we add it to skipped paths.
-						if reason != "" {
-							v.skippedPaths = append(v.skippedPaths, skippedAccessPath{append(path, leg), reason})
-						}
+					if ok := v.filter(append(path, leg)); !ok {
 						continue
 					}
 
 					// We got a valid path, and it's the first time seeing this list: marking it as seen.
-					v.seen[name] = struct{}{}
+					seen[name] = struct{}{}
 
-					v.stack = append(v.stack, append(path, leg))
+					stack = append(stack, append(path, leg))
 					continue
 				}
 
 				leg = accessLeg{member: member}
 				// This is not a nested list but an individual member.
 				// Check if the member passes the filter.
-				if ok, reason := v.filter(leg); !ok {
-					// If the leg is not valid and the caller should be informed, we add it to skipped paths.
-					if reason != "" {
-						v.skippedPaths = append(v.skippedPaths, skippedAccessPath{append(path, leg), reason})
-					}
+				if ok := v.filter(append(path, leg)); !ok {
 					continue
 				}
 
@@ -248,17 +248,4 @@ func (v *visitor) accessPaths(ctx context.Context) iter.Seq2[accessPath, error] 
 			}
 		}
 	}
-}
-
-func (v *visitor) explainAccessDecision() string {
-	var sb strings.Builder
-	sb.WriteString("User is not member of the access list, directly or via nested list")
-	if len(v.skippedPaths) == 0 {
-		return sb.String()
-	}
-	sb.WriteString("\nWhen resolving access, the following access paths were ignored:")
-	for _, path := range v.skippedPaths {
-		sb.WriteString(fmt.Sprintf("\n * %q because %s", path, path.reason))
-	}
-	return sb.String()
 }
