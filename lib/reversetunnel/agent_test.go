@@ -34,7 +34,6 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/gravitational/teleport"
-	"github.com/gravitational/teleport/api/defaults"
 	tracessh "github.com/gravitational/teleport/api/observability/tracing/ssh"
 	"github.com/gravitational/teleport/api/types"
 	apisshutils "github.com/gravitational/teleport/api/utils/sshutils"
@@ -109,6 +108,9 @@ func (m *mockSSHClient) Reply(r *ssh.Request, ok bool, payload []byte) error {
 
 func (m *mockSSHClient) GlobalRequests() <-chan *ssh.Request {
 	return m.MockGlobalRequests
+}
+
+func (m *mockSSHClient) EnableWatchdog(timeout time.Duration) {
 }
 
 type fakeReaderWriter struct{}
@@ -199,8 +201,8 @@ func testAgent(t *testing.T, config agentConfig) (*agent, *mockSSHClient) {
 		config.keepAlive = time.Millisecond * 100
 	}
 
-	if config.heartbeatTimeout == 0 {
-		config.heartbeatTimeout = defaults.DefaultIOTimeout
+	if config.keepAliveCount == 0 {
+		config.keepAliveCount = 1
 	}
 
 	agent, err := newAgent(config)
@@ -300,7 +302,7 @@ func TestAgentStart(t *testing.T) {
 			name:            "V2 supported and disabled by env",
 			srvSupportsHbV2: true,
 			config: agentConfig{
-				heartbeatTimeoutDisabled: true,
+				staleConnTimeoutDisabled: true,
 			},
 		},
 		{
@@ -310,7 +312,7 @@ func TestAgentStart(t *testing.T) {
 		{
 			name: "V2 not supported env disable has no effect",
 			config: agentConfig{
-				heartbeatTimeoutDisabled: true,
+				staleConnTimeoutDisabled: true,
 			},
 		},
 		{
@@ -349,9 +351,12 @@ func TestAgentStart(t *testing.T) {
 
 				switch name {
 				case chanHeartbeatV2:
-					if !tt.srvSupportsHbV2 {
-						return nil, nil, &ssh.OpenChannelError{Reason: ssh.UnknownChannelType}
+					err := &ssh.OpenChannelError{Reason: ssh.UnknownChannelType}
+					if tt.srvSupportsHbV2 {
+						err = &ssh.OpenChannelError{Reason: RejectFeatureSupported}
 					}
+					return nil, nil, err
+
 				case chanHeartbeat:
 				default:
 					assert.Fail(t, "unexpected channel name", name)
@@ -362,7 +367,7 @@ func TestAgentStart(t *testing.T) {
 						&mockSSHChannel{
 							MockSendRequest: func(name string, wantReply bool, payload []byte) (bool, error) {
 								atomic.AddInt32(sentPings, 1)
-								if !tt.srvSupportsHbV2 || tt.config.heartbeatTimeoutDisabled {
+								if !tt.srvSupportsHbV2 || tt.config.staleConnTimeoutDisabled {
 									assert.False(t, wantReply, "Expected no reply wanted.")
 								} else {
 									assert.True(t, wantReply, "Expected reply wanted.")
@@ -483,12 +488,11 @@ func TestAgentStateTransitions(t *testing.T) {
 }
 
 type mockHeartbeatInstance struct {
-	sshServer             *sshutils.Server
-	supportsV2            bool
-	doNotReplyToHeartbeat atomic.Bool
-	heartbeatV1Counter    atomic.Int64
-	heartbeatV2Counter    atomic.Int64
-	t                     *testing.T
+	sshServer        *sshutils.Server
+	supportsV2       bool
+	heartbeatCounter atomic.Int64
+	pauseResponses   atomic.Bool
+	t                *testing.T
 }
 
 func (m *mockHeartbeatInstance) Start() error {
@@ -500,24 +504,21 @@ func (m *mockHeartbeatInstance) Stop() {
 }
 
 func (m *mockHeartbeatInstance) HandleNewChan(ctx context.Context, ccx *sshutils.ConnectionContext, nch ssh.NewChannel) {
-	conn := ccx.NetConn
-	sconn := ccx.ServerConn
-
 	switch nch.ChannelType() {
-	case chanHeartbeatV2:
-		if !m.supportsV2 {
-			nch.Reject(ssh.UnknownChannelType, "rejected")
-			return
-		}
-		go m.handleHeartbeat(ctx, conn, sconn, nch)
 	case chanHeartbeat:
-		go m.handleHeartbeat(ctx, conn, sconn, nch)
+		go m.handleHeartbeat(ctx, ccx.NetConn, ccx.ServerConn, nch)
+	case chanHeartbeatV2:
+		if m.supportsV2 {
+			nch.Reject(RejectFeatureSupported, "rejected")
+			break
+		}
+		fallthrough
 	default:
 		nch.Reject(ssh.UnknownChannelType, "rejected")
 	}
 }
 
-func (m *mockHeartbeatInstance) handleHeartbeat(ctx context.Context, conn net.Conn, sconn *ssh.ServerConn, nch ssh.NewChannel) {
+func (m *mockHeartbeatInstance) handleHeartbeat(ctx context.Context, conn net.Conn, _ *ssh.ServerConn, nch ssh.NewChannel) {
 	ch, req, err := nch.Accept()
 	assert.NoError(m.t, err, "Failed to accept channel")
 
@@ -538,21 +539,16 @@ func (m *mockHeartbeatInstance) handleHeartbeat(ctx context.Context, conn net.Co
 		case <-ctx.Done():
 			return
 		case r, ok := <-req:
-			if !ok {
+			if !ok || r == nil {
 				return
 			}
 
-			switch nch.ChannelType() {
-			case chanHeartbeatV2:
-				if r.WantReply && !m.doNotReplyToHeartbeat.Load() {
-					r.Reply(true, nil)
-				}
-				m.heartbeatV2Counter.Add(1)
-			case chanHeartbeat:
-				m.heartbeatV1Counter.Add(1)
-			default:
+			for m.pauseResponses.Load() {
+				time.Sleep(10 * time.Millisecond)
 			}
 
+			r.Reply(false, nil)
+			m.heartbeatCounter.Add(1)
 		}
 	}
 }
@@ -565,10 +561,7 @@ func setupMockServerAndAgent(t *testing.T, tt *testAgentTimeoutCase) (*mockHeart
 	cert, err := apisshutils.MakeRealHostCert(ca)
 	require.NoError(t, err)
 
-	mock := &mockHeartbeatInstance{
-		t:          t,
-		supportsV2: tt.supportsV2,
-	}
+	mock := &mockHeartbeatInstance{t: t, supportsV2: tt.supportsV2}
 
 	sshServer, err := sshutils.NewServer(
 		"test",
@@ -600,12 +593,13 @@ func setupMockServerAndAgent(t *testing.T, tt *testAgentTimeoutCase) (*mockHeart
 		Cluster:                  "test",
 		AuthMethods:              []ssh.AuthMethod{ssh.PublicKeys(signer)},
 		HostUUID:                 uuid.NewString(),
+		StaleConnTimeoutDisabled: tt.staleConnTimeoutDisabled,
 		HeartbeatTimeout:         tt.heartbeatTimeout,
-		HeartbeatTimeoutDisabled: tt.heartbeatTimeoutDisabled,
 	})
 	require.NoError(t, err)
 
 	pool.runtimeConfig.keepAliveInterval = tt.keepAliveInterval
+	pool.runtimeConfig.keepAliveCount = tt.keepAliveCount
 
 	tracker, err := track.New(track.Config{ClusterName: "test"})
 	require.NoError(t, err)
@@ -622,11 +616,11 @@ func setupMockServerAndAgent(t *testing.T, tt *testAgentTimeoutCase) (*mockHeart
 type testAgentTimeoutCase struct {
 	name                     string
 	supportsV2               bool
-	heartbeatTimeoutDisabled bool
-	heartbeatTimeout         time.Duration
+	staleConnTimeoutDisabled bool
 	keepAliveInterval        time.Duration
-	postConnectFn            func(*testing.T, *mockHeartbeatInstance, Agent)
-	postFailureFn            func(*testing.T, *mockHeartbeatInstance, Agent)
+	heartbeatTimeout         time.Duration
+	keepAliveCount           int
+	testFn                   func(*testing.T, *mockHeartbeatInstance, Agent, time.Duration, time.Duration)
 }
 
 // TestAgentTimeout runs an agent against a mock SSH server and ensures that
@@ -637,60 +631,68 @@ func TestAgentTimeout(t *testing.T) {
 		{
 			name:              "server supports V2",
 			supportsV2:        true,
-			heartbeatTimeout:  20 * time.Millisecond,
 			keepAliveInterval: 100 * time.Millisecond,
-			postConnectFn: func(t *testing.T, mock *mockHeartbeatInstance, a Agent) {
-				require.Equal(t, AgentConnected, a.GetState())
-				require.EventuallyWithT(t, func(collect *assert.CollectT) {
-					assert.GreaterOrEqual(collect, mock.heartbeatV2Counter.Load(), int64(2))
-				}, 1*time.Second, 50*time.Millisecond, "Expected at least 2 V2 heartbeats to be received.")
-				assert.Zero(t, mock.heartbeatV1Counter.Load(), "Expected no heartbeats over V1 channel")
-			},
-			postFailureFn: func(t *testing.T, _ *mockHeartbeatInstance, a Agent) {
+			heartbeatTimeout:  50 * time.Millisecond,
+			keepAliveCount:    3,
+			testFn: func(t *testing.T, mock *mockHeartbeatInstance, a Agent, waitFor time.Duration, tick time.Duration) {
+				mock.pauseResponses.Store(true)
+
 				require.EventuallyWithT(t, func(collect *assert.CollectT) {
 					assert.Equal(collect, AgentClosed, a.GetState())
-				}, 1*time.Second, 50*time.Millisecond, "Expected agent to enter disconnected state after heartbeat timeout.")
+				}, waitFor, tick, "Expected agent to enter disconnected state after heartbeat timeout.")
 			},
 		},
 		{
+			name:              "server supports V2, recover before disconnect",
+			supportsV2:        true,
+			keepAliveInterval: 100 * time.Millisecond,
+			heartbeatTimeout:  50 * time.Millisecond,
+			keepAliveCount:    5,
+			testFn: func(t *testing.T, mock *mockHeartbeatInstance, a Agent, waitFor time.Duration, tick time.Duration) {
+				mock.pauseResponses.Store(true)
+				count := mock.heartbeatCounter.Load()
+
+				require.Never(t, func() bool {
+					return mock.heartbeatCounter.Load() > count
+				}, 150*time.Millisecond, tick, "no further heartbeats expected")
+
+				// Restore server back to normal
+				mock.pauseResponses.Store(false)
+
+				require.EventuallyWithT(t, func(collect *assert.CollectT) {
+					assert.GreaterOrEqual(collect, mock.heartbeatCounter.Load(), count+4, "heartbeats resume as normal")
+				}, waitFor, tick, "Expected heartbeats to resume after recovery")
+				assert.Equal(t, AgentConnected, a.GetState(), "expected agent to stay connected")
+			},
+		},
+
+		{
 			name:                     "server supports V2 but env override set",
 			supportsV2:               true,
-			heartbeatTimeoutDisabled: true,
-			heartbeatTimeout:         20 * time.Millisecond,
+			staleConnTimeoutDisabled: true,
 			keepAliveInterval:        100 * time.Millisecond,
-			postConnectFn: func(t *testing.T, mock *mockHeartbeatInstance, a Agent) {
-				require.Equal(t, AgentConnected, a.GetState())
-				require.EventuallyWithT(t, func(collect *assert.CollectT) {
-					assert.GreaterOrEqual(collect, mock.heartbeatV2Counter.Load(), int64(2))
-				}, 1*time.Second, 50*time.Millisecond, "Expected at least 2 V2 heartbeats to be received.")
-				assert.Zero(t, mock.heartbeatV1Counter.Load(), "Expected no heartbeats over V1 channel")
-			},
-			postFailureFn: func(t *testing.T, mock *mockHeartbeatInstance, a Agent) {
-				count := mock.heartbeatV2Counter.Load()
-				require.EventuallyWithT(t, func(collect *assert.CollectT) {
-					assert.GreaterOrEqual(collect, mock.heartbeatV2Counter.Load(), count+2)
-				}, 1*time.Second, 50*time.Millisecond, "Expected at least 2 more V2 heartbeats to be received.")
-				require.Equal(t, AgentConnected, a.GetState(), "Expected agent to remain connected.")
+			heartbeatTimeout:         50 * time.Millisecond,
+			keepAliveCount:           3,
+
+			testFn: func(t *testing.T, mock *mockHeartbeatInstance, a Agent, waitFor time.Duration, tick time.Duration) {
+				mock.pauseResponses.Store(true)
+				require.Never(t, func() bool {
+					return a.GetState() != AgentConnected
+				}, waitFor, tick, "Expected agent to remain connected.")
 			},
 		},
 		{
 			name:              "server does not support V2",
 			supportsV2:        false,
-			heartbeatTimeout:  20 * time.Millisecond,
 			keepAliveInterval: 100 * time.Millisecond,
-			postConnectFn: func(t *testing.T, mock *mockHeartbeatInstance, a Agent) {
-				require.Equal(t, AgentConnected, a.GetState())
-				require.EventuallyWithT(t, func(collect *assert.CollectT) {
-					assert.GreaterOrEqual(collect, mock.heartbeatV1Counter.Load(), int64(2))
-				}, 1*time.Second, 50*time.Millisecond, "Expected at least 2 V1 heartbeats to be received.")
-				assert.Zero(t, mock.heartbeatV2Counter.Load(), "Expected no heartbeats over V2 channel")
-			},
-			postFailureFn: func(t *testing.T, mock *mockHeartbeatInstance, a Agent) {
-				count := mock.heartbeatV1Counter.Load()
-				require.EventuallyWithT(t, func(collect *assert.CollectT) {
-					assert.GreaterOrEqual(collect, mock.heartbeatV1Counter.Load(), count+2)
-				}, 1*time.Second, 50*time.Millisecond, "Expected at least 2 more V1 heartbeats to be received.")
-				require.Equal(t, AgentConnected, a.GetState(), "Expected agent to remain connected.")
+			heartbeatTimeout:  50 * time.Millisecond,
+			keepAliveCount:    5,
+			testFn: func(t *testing.T, mock *mockHeartbeatInstance, a Agent, waitFor time.Duration, tick time.Duration) {
+				mock.pauseResponses.Store(true)
+
+				require.Never(t, func() bool {
+					return a.GetState() != AgentConnected
+				}, waitFor, tick, "Expected agent to remain connected.")
 			},
 		},
 	}
@@ -703,14 +705,18 @@ func TestAgentTimeout(t *testing.T) {
 			t.Cleanup(func() { mock.Stop() })
 
 			require.NoError(t, agent.Start(ctx))
+			t.Cleanup(func() { mock.pauseResponses.Store(false) })
 			t.Cleanup(func() { agent.Stop() })
+			defaultDisconnectTimeout := (tt.keepAliveInterval * time.Duration(tt.keepAliveCount+1))
+			defaultTickTime := tt.keepAliveInterval / 2
 
 			// Wait for some successful heartbeats to be received.
-			tt.postConnectFn(t, mock, agent)
-			// Inject failure to respond to heartbeats.
-			mock.doNotReplyToHeartbeat.Store(true)
-			tt.postFailureFn(t, mock, agent)
+			require.Equal(t, AgentConnected, agent.GetState())
+			require.EventuallyWithT(t, func(collect *assert.CollectT) {
+				assert.GreaterOrEqual(collect, mock.heartbeatCounter.Load(), int64(2))
+			}, defaultDisconnectTimeout, defaultTickTime, "Expected at least 2 heartbeats to be received.")
 
+			tt.testFn(t, mock, agent, defaultDisconnectTimeout, defaultTickTime)
 		})
 	}
 

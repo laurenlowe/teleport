@@ -142,11 +142,11 @@ type AgentPoolConfig struct {
 	LocalAuthAddresses []string
 	// PROXYSigner is used to sign PROXY headers for securely propagating client IP address
 	PROXYSigner multiplexer.PROXYHeaderSigner
-	// HeartbeatTimeout is the timeout for server heartbeat responses.
-	// By default this is set to [defaults.DefaultIOTimeout].
+	// StaleConnTimeoutDisabled is true if connection timeouts are disabled.
+	StaleConnTimeoutDisabled bool
+	// HeartbeatTimeout is the timeout used by agent when waiting for server reply to a heartbeat message.
+	// By default [defaults.DefaultIOTimeout].
 	HeartbeatTimeout time.Duration
-	// HeartbeatTimeoutDisabled is true if heartbeat timeouts are disabled.
-	HeartbeatTimeoutDisabled bool
 }
 
 // CheckAndSetDefaults checks and sets defaults.
@@ -174,11 +174,6 @@ func (cfg *AgentPoolConfig) CheckAndSetDefaults() error {
 	}
 	if cfg.HeartbeatTimeout == 0 {
 		cfg.HeartbeatTimeout = defaults.DefaultIOTimeout
-	}
-
-	if !cfg.HeartbeatTimeoutDisabled {
-		// If not explicitly disabled, check for the environment variable.
-		cfg.HeartbeatTimeoutDisabled = isHeartbeatTimeoutDisabledByEnv()
 	}
 
 	return nil
@@ -458,13 +453,14 @@ func (p *AgentPool) getStateCallback(agent Agent) AgentStateCallback {
 	}
 }
 
-// isHeartbeatTimeoutDisabledByEnv returns true if the TELEPORT_UNSTABLE_DISABLE_AGENT_HEARTBEAT_TIMEOUT
+// isHeartbeatTimeoutDisabledByEnv returns true if the TELEPORT_UNSTABLE_DISABLE_AGENT_STALE_CONN_TIMEOUT
 // environment variable is set.
 //
 // Either "yes" or a "truthy" value (as defined by [strconv.ParseBool]) are
 // considered true.
-func isHeartbeatTimeoutDisabledByEnv() bool {
-	const envVar = "TELEPORT_UNSTABLE_DISABLE_AGENT_HEARTBEAT_TIMEOUT"
+func IsAgentStaleConnTimeoutDisabledByEnv() bool {
+	// TODO(okraport): rename this to something more meaningful now that the design is changed.
+	const envVar = "TELEPORT_UNSTABLE_DISABLE_AGENT_STALE_CONN_TIMEOUT"
 
 	if val := os.Getenv(envVar); val != "" {
 		b, _ := strconv.ParseBool(val)
@@ -504,6 +500,7 @@ func (p *AgentPool) newAgent(ctx context.Context, tracker *track.Tracker, lease 
 	agent, err := newAgent(agentConfig{
 		addr:                     *addr,
 		keepAlive:                p.runtimeConfig.keepAliveInterval,
+		keepAliveCount:           p.runtimeConfig.keepAliveCount,
 		sshDialer:                dialer,
 		transportHandler:         p,
 		versionGetter:            p,
@@ -513,8 +510,8 @@ func (p *AgentPool) newAgent(ctx context.Context, tracker *track.Tracker, lease 
 		logger:                   p.logger,
 		localAuthAddresses:       p.LocalAuthAddresses,
 		proxySigner:              p.PROXYSigner,
+		staleConnTimeoutDisabled: p.StaleConnTimeoutDisabled,
 		heartbeatTimeout:         p.HeartbeatTimeout,
-		heartbeatTimeoutDisabled: p.HeartbeatTimeoutDisabled,
 	})
 	if err != nil {
 		return nil, trace.Wrap(err)
@@ -659,6 +656,9 @@ type agentPoolRuntimeConfig struct {
 	connectionCount int
 	// keepAliveInterval is the interval agents will send heartbeats at.
 	keepAliveInterval time.Duration
+	// keepAliveCount specifies the amount of missed ping heartbeats
+	// to wait for before declaring the connection as broken.
+	keepAliveCount int
 	// isRemoteCluster forces the agent pool to connect to all proxies
 	// regardless of the configured tunnel strategy.
 	isRemoteCluster bool
@@ -686,6 +686,7 @@ func newAgentPoolRuntimeConfig() *agentPoolRuntimeConfig {
 		connectionCount:    defaultAgentConnectionCount,
 		proxyListenerMode:  types.ProxyListenerMode_Separate,
 		keepAliveInterval:  defaults.KeepAliveInterval(),
+		keepAliveCount:     defaults.KeepAliveCountMax,
 		clock:              clockwork.NewRealClock(),
 	}
 }
