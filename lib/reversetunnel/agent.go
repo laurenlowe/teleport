@@ -417,20 +417,29 @@ func (a *agent) connect() error {
 
 // sendHeartbeatWithTimeout sends a ping message to the configured heartbeat channel with a timeout.
 func (a *agent) sendHeartbeatWithTimeout(ctx context.Context, timeout time.Duration) error {
-	errorCh := make(chan error, 1)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	errorCh := make(chan error)
 	bytes, _ := a.clock.Now().UTC().MarshalText()
 
 	go func() {
+		defer close(errorCh)
+
 		_, err := a.hbChannel.SendRequest(ctx, "ping", true, bytes)
-		errorCh <- err
+		select {
+		case errorCh <- err:
+		case <-ctx.Done():
+		}
 	}()
 
 	select {
 	case err := <-errorCh:
 		return trace.Wrap(err)
-	case <-time.After(timeout):
-		return trace.ConnectionProblem(nil, "no reply to heartbeat")
 	case <-ctx.Done():
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return trace.ConnectionProblem(ctx.Err(), "no reply to heartbeat")
+		}
 		return trace.Wrap(ctx.Err())
 	}
 }
