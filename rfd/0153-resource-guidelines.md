@@ -300,6 +300,25 @@ against the backend has a potentially different view of the data. It is possible
 * Items to be deleted or created between `List` calls.
 * Mutable fields to be modified causing items to be reordered when sorting resulting in duplicate entries.
 
+#### Sorting Support
+
+Note that as of time of writing (2025-11-24), Teleport implements sorting items in Cache only. 
+
+This is achieved via the [sortcache](https://github.com/gravitational/teleport/blob/96f222c00624e3f7ad3cbcd1859936420b438725/lib/utils/sortcache/sortcache.go#L47) package.
+
+Each index requires a key function that returns lexicographically sortable key, for example:
+```go
+func FooTitleIndexKey(f *Foo) string {
+	title := cases.Fold().String(f.Spec.Title)
+	title = base32.HexEncoding.WithPadding(base32.NoPadding).EncodeToString([]byte(title))
+	return title + "/" + f.GetName()
+}
+```
+
+This key is then reused as the pagination token.
+
+Compound keys should use "/" as the separator, and must be lexicographically ordered.
+
 ##### Page Token contract
 
 The backend only enforces a single contract for the token:
