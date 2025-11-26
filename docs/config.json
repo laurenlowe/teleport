@@ -2492,7 +2492,7 @@
     },
     {
       "source": "/machine-workload-identity/workload-identity/gcp-workload-identity-federation-jwt/",
-      "destination": "/machine-workload-identity/gcp-workload-identity-federation-jwt/",
+      "destination": "/machine-workload-identity/deployment/gcp-workload-identity-federation-jwt/",
       "permanent": true
     },
     {
@@ -2512,7 +2512,7 @@
     },
     {
       "source": "/machine-workload-identity/workload-identity/spiffe/",
-      "destination": "/machine-workload-identity/spiffe/",
+      "destination": "/machine-workload-identity/use-cases/spiffe-workload-api/",
       "permanent": true
     },
     {
