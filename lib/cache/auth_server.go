@@ -18,6 +18,8 @@ package cache
 import (
 	"context"
 
+	"github.com/gravitational/teleport/api/utils/clientutils"
+	"github.com/gravitational/teleport/lib/itertools/stream"
 	"github.com/gravitational/trace"
 
 	"github.com/gravitational/teleport/api/types"
@@ -41,8 +43,8 @@ func newAuthServerCollection(p services.Presence, w types.WatchKind) (*collectio
 				authServerNameIndex: types.Server.GetName,
 			}),
 		fetcher: func(ctx context.Context, loadSecrets bool) ([]types.Server, error) {
-			servers, err := p.GetAuthServers()
-			return servers, trace.Wrap(err)
+			out, err := stream.Collect(clientutils.Resources(ctx, p.ListAuthServers))
+			return out, trace.Wrap(err)
 		},
 		headerTransform: func(hdr *types.ResourceHeader) types.Server {
 			return &types.ServerV2{
@@ -58,6 +60,8 @@ func newAuthServerCollection(p services.Presence, w types.WatchKind) (*collectio
 }
 
 // GetAuthServers returns a list of registered servers
+//
+// Deprecated: Prefer paginated gRPC variant [ListAuthServers].
 func (c *Cache) GetAuthServers() ([]types.Server, error) {
 	_, span := c.Tracer.Start(context.TODO(), "cache/GetAuthServers")
 	defer span.End()

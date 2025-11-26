@@ -19,6 +19,8 @@ package cache
 import (
 	"context"
 
+	"github.com/gravitational/teleport/api/utils/clientutils"
+	"github.com/gravitational/teleport/lib/itertools/stream"
 	"github.com/gravitational/trace"
 
 	"github.com/gravitational/teleport/api/types"
@@ -42,8 +44,8 @@ func newProxyServerCollection(p services.Presence, w types.WatchKind) (*collecti
 				proxyServerNameIndex: types.Server.GetName,
 			}),
 		fetcher: func(ctx context.Context, loadSecrets bool) ([]types.Server, error) {
-			servers, err := p.GetProxies()
-			return servers, trace.Wrap(err)
+			out, err := stream.Collect(clientutils.Resources(ctx, p.ListProxies))
+			return out, trace.Wrap(err)
 		},
 		headerTransform: func(hdr *types.ResourceHeader) types.Server {
 			return &types.ServerV2{
@@ -59,6 +61,8 @@ func newProxyServerCollection(p services.Presence, w types.WatchKind) (*collecti
 }
 
 // GetProxies is a part of auth.Cache implementation
+//
+// Deprecated: Prefer paginated gRPC variant [ListProxies].
 func (c *Cache) GetProxies() ([]types.Server, error) {
 	_, span := c.Tracer.Start(context.TODO(), "cache/GetProxies")
 	defer span.End()
