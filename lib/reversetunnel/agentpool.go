@@ -459,7 +459,6 @@ func (p *AgentPool) getStateCallback(agent Agent) AgentStateCallback {
 // Either "yes" or a "truthy" value (as defined by [strconv.ParseBool]) are
 // considered true.
 func IsAgentStaleConnTimeoutDisabledByEnv() bool {
-	// TODO(okraport): rename this to something more meaningful now that the design is changed.
 	const envVar = "TELEPORT_UNSTABLE_DISABLE_AGENT_STALE_CONN_TIMEOUT"
 
 	if val := os.Getenv(envVar); val != "" {
