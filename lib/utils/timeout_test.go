@@ -108,7 +108,6 @@ func TestObeyDelayedIdleTimeoutNeverEnabled(t *testing.T) {
 	t.Cleanup(func() { c2.Close() })
 
 	errC := make(chan error, 1)
-	t.Cleanup(func() { close(errC) })
 
 	go func() {
 		var b [1]byte
