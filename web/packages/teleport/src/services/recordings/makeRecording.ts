@@ -29,9 +29,34 @@ export function makeRecording(event: any): Recording {
     return makeDesktopRecording(event);
   } else if (event.code === eventCodes.DATABASE_SESSION_ENDED) {
     return makeDatabaseRecording(event);
+  } else if (event.code === eventCodes.APP_SESSION_CHUNK) {
+    return makeAppRecording(event);
   } else {
     return makeSshOrKubeRecording(event);
   }
+}
+
+function makeAppRecording(event: {
+  time: string;
+  user: string;
+  sid: string;
+  session_chunk_id: string;
+  app_name: string;
+}): Recording {
+  const { time, user, sid, session_chunk_id, app_name } = event;
+
+  return {
+    duration: 0,
+    durationText: '-',
+    sid: session_chunk_id,
+    createdDate: new Date(time),
+    users: user,
+    hostname: app_name,
+    description: 'non-interactive',
+    recordingType: 'app',
+    playable: false,
+    user,
+  } as Recording;
 }
 
 function makeDesktopRecording({

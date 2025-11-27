@@ -86,8 +86,18 @@ func (e *SessionsCollection) WriteText(w io.Writer) error {
 			participants = strings.Join(session.Participants, ", ")
 			target = session.DatabaseName
 			timestamp = session.GetTime().Format(constants.HumanDateFormatSeconds)
+		case *events.AppSessionChunk:
+			id = session.GetSessionChunkID()
+			typ = "app-chunk"
+			participants = session.User
+			target = session.AppName
+			if target == "" {
+				target = session.AppURI
+			}
+			timestamp = session.GetTime().Format(constants.HumanDateFormatSeconds)
+
 		default:
-			slog.WarnContext(context.Background(), "unsupported event type: expected SessionEnd, WindowsDesktopSessionEnd or DatabaseSessionEnd", "event_type", logutils.TypeAttr(event))
+			slog.WarnContext(context.Background(), "unsupported event type: expected SessionEnd, WindowsDesktopSessionEnd, DatabaseSessionEnd or AppSessionChunk", "event_type", logutils.TypeAttr(event))
 			continue
 		}
 
