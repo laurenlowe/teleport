@@ -146,7 +146,7 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
           env:
-            {{- $gomemlimit := include "teleport-replay.gomemlimit" . }}
+            {{- $gomemlimit := include "teleport-relay.gomemlimit" . }}
             {{- if $gomemlimit }}
             - name: GOMEMLIMIT
               value: {{ $gomemlimit | quote }}
