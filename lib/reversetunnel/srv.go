@@ -1014,7 +1014,9 @@ func (s *server) upsertServiceConn(conn net.Conn, sconn *ssh.ServerConn, connTyp
 		return nil, nil, trace.BadParameter("host id not found")
 	}
 
-	rconn, err := s.localCluster.addConn(nodeID, connType, conn, sconn)
+	scope := sconn.Permissions.Extensions[extScope]
+
+	rconn, err := s.localCluster.addConn(nodeID, scope, connType, conn, sconn)
 	if err != nil {
 		return nil, nil, trace.Wrap(err)
 	}
@@ -1355,6 +1357,6 @@ const (
 	extHost      = "host@teleport"
 	extAuthority = "auth@teleport"
 	extCertRole  = "role"
-
+	extScope     = "scope@goteleport.com"
 	versionRequest = "x-teleport-version"
 )

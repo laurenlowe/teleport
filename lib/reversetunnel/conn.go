@@ -44,7 +44,8 @@ import (
 // and applications.
 type connKey struct {
 	// uuid is the host UUID of the process.
-	uuid string
+	uuid  string
+	scope string
 	// connType is the type of tunnel, for example: node or application.
 	connType types.TunnelType
 }
@@ -103,6 +104,8 @@ type connConfig struct {
 	// nodeID is used when tunnelType is node and is set
 	// to the node UUID dialing back
 	nodeID string
+
+	scope string
 
 	// offlineThreshold is how long to wait for a keep alive message before
 	// marking a reverse tunnel connection as invalid.
