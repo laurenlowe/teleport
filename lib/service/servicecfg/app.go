@@ -261,6 +261,8 @@ type Rewrite struct {
 	Headers []Header
 	// JWTClaims configures whether roles/traits are included in the JWT token.
 	JWTClaims string
+	// JwtIssuer configures which issuer to issue the token.
+	JwtIssuer string
 }
 
 // Header represents a single http header passed over to the proxied application.

@@ -1703,6 +1703,7 @@ func (c *Client) GenerateAppToken(ctx context.Context, req types.GenerateAppToke
 		Traits:   traits,
 		URI:      req.URI,
 		Expires:  req.Expires,
+		Issuer:   req.Issuer,
 	})
 	if err != nil {
 		return "", trace.Wrap(err)

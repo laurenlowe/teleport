@@ -799,6 +799,9 @@ message GenerateAppTokenRequest {
   ];
   // Traits are the traits assigned to the user within Teleport.
   map<string, wrappers.StringValues> Traits = 5 [(gogoproto.jsontag) = "traits"];
+  // Issuer configures which issuer to issue the token. Valid options are
+  // "jwt" (default) and "oidc".
+  string issuer = 6;
 }
 
 // GenerateAppTokenResponse contains a signed application token.

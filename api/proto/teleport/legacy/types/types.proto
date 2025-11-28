@@ -1200,6 +1200,11 @@ message Rewrite {
   repeated Header Headers = 2 [(gogoproto.jsontag) = "headers,omitempty"];
   // JWTClaims configures whether roles/traits are included in the JWT token.
   string JWTClaims = 3 [(gogoproto.jsontag) = "jwt_claims,omitempty"];
+  // JwtIssuer configures which issuer to issue the token. Valid options are
+  // "jwt" (default) and "oidc". Tokens issued by "jwt" can be verified via
+  // ".well-known/jwks.json". Tokens issued by "odic" can be verified via
+  // ".well-known/openid-configuration".
+  string jwt_issuer = 4;
 }
 
 // Header represents a single http header passed over to the proxied application.

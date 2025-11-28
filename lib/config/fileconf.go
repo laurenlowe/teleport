@@ -2290,6 +2290,11 @@ type Rewrite struct {
 	Headers []string `yaml:"headers,omitempty"`
 	// JWTClaims configures whether roles/traits are included in the JWT token
 	JWTClaims string `yaml:"jwt_claims,omitempty"`
+	// JwtIssuer configures which issuer to issue the token. Valid options are
+	// "jwt" (default) and "oidc". Tokens issued by "jwt" can be verified via
+	// ".well-known/jwks.json". Tokens issued by "odic" can be verified via
+	// ".well-known/openid-configuration".
+	JwtIssuer string `yaml:"jwt_issuer,omitempty"`
 }
 
 // AppAWS contains additional options for AWS applications.

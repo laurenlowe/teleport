@@ -607,7 +607,7 @@ func TestGCPKMSKeystore(t *testing.T) {
 					require.NoError(t, err, "unexpected error deleting JWT key")
 				}
 
-				_, err = servicesJWTSigner.Sign(jwt.SignParams{
+				_, err = servicesJWTSigner.SignApp(jwt.SignParams{
 					Username: "root",
 					Roles:    []string{"access"},
 					URI:      "example.com",

@@ -20,6 +20,7 @@
 package jwt
 
 import (
+	"cmp"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -212,7 +213,8 @@ func SigningKeyFromPrivateKey(priv crypto.Signer) (jose.SigningKey, error) {
 	}, nil
 }
 
-func (k *Key) Sign(p SignParams) (string, error) {
+// SignApp signs a JWT with claims for Teleport applications.
+func (k *Key) SignApp(p SignParams) (string, error) {
 	if err := p.Check(); err != nil {
 		return "", trace.Wrap(err)
 	}
@@ -221,8 +223,9 @@ func (k *Key) Sign(p SignParams) (string, error) {
 	claims := Claims{
 		Claims: jwt.Claims{
 			Subject:   p.Username,
-			Issuer:    k.config.ClusterName,
+			Issuer:    cmp.Or(p.Issuer, k.config.ClusterName),
 			Audience:  jwt.Audience{p.URI},
+			ID:        uuid.NewString(),
 			NotBefore: jwt.NewNumericDate(k.config.Clock.Now().Add(-10 * time.Second)),
 			IssuedAt:  jwt.NewNumericDate(k.config.Clock.Now()),
 			Expiry:    jwt.NewNumericDate(p.Expires),

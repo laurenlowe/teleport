@@ -53,7 +53,7 @@ func TestSignAndVerify(t *testing.T) {
 			require.NoError(t, err)
 
 			// Sign a token with the new key.
-			token, err := key.Sign(SignParams{
+			token, err := key.SignApp(SignParams{
 				Username: "foo@example.com",
 				Roles:    []string{"foo", "bar"},
 				Expires:  clock.Now().Add(1 * time.Minute),
@@ -146,7 +146,7 @@ func TestPublicOnlyVerify(t *testing.T) {
 			require.NoError(t, err)
 
 			// Sign a token with the new key.
-			token, err := key.Sign(SignParams{
+			token, err := key.SignApp(SignParams{
 				Username: "foo@example.com",
 				Roles:    []string{"foo", "bar"},
 				Traits: wrappers.Traits{
@@ -174,7 +174,7 @@ func TestPublicOnlyVerify(t *testing.T) {
 			require.Equal(t, []string{"foo", "bar"}, claims.Roles)
 
 			// Make sure this key returns an error when trying to sign.
-			_, err = key.Sign(SignParams{
+			_, err = key.SignApp(SignParams{
 				Username: "foo@example.com",
 				Roles:    []string{"foo", "bar"},
 				Expires:  clock.Now().Add(1 * time.Minute),
@@ -346,7 +346,7 @@ func TestExpiry(t *testing.T) {
 			require.NoError(t, err)
 
 			// Sign a token with a 1 minute expiration.
-			token, err := key.Sign(SignParams{
+			token, err := key.SignApp(SignParams{
 				Username: "foo@example.com",
 				Roles:    []string{"foo", "bar"},
 				Traits: wrappers.Traits{

@@ -40,6 +40,10 @@ type GenerateAppTokenRequest struct {
 
 	// URI is the URI of the recipient application.
 	URI string
+
+	// Issuer configures which issuer to issue the token. Valid options are
+	// "jwt" (default) and "oidc".
+	Issuer string
 }
 
 // Check validates the request.
