@@ -39,11 +39,10 @@ export function makeRecording(event: any): Recording {
 function makeAppRecording(event: {
   time: string;
   user: string;
-  sid: string;
   session_chunk_id: string;
   app_name: string;
 }): Recording {
-  const { time, user, sid, session_chunk_id, app_name } = event;
+  const { time, user, session_chunk_id, app_name } = event;
 
   return {
     duration: 0,
