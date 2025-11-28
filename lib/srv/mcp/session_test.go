@@ -20,6 +20,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"sync"
 	"testing"
@@ -27,6 +28,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gravitational/teleport/api/types"
 	apievents "github.com/gravitational/teleport/api/types/events"
 	libevents "github.com/gravitational/teleport/lib/events"
 	"github.com/gravitational/teleport/lib/events/eventstest"
@@ -51,7 +53,7 @@ func (c *captureMessageWriter) messages() []mcp.JSONRPCMessage {
 	return slices.Clone(c.msgs)
 }
 
-func Test_sessionHandler(t *testing.T) {
+func Test_sessionHandler_rbac(t *testing.T) {
 	tests := []struct {
 		name         string
 		setupOptions []setupTestContextOptionFunc
@@ -184,6 +186,88 @@ func Test_sessionHandler(t *testing.T) {
 				require.Len(t, clientMessages, 1)
 				checkToolsListResponse(t, clientMessages[0], clientReq.ID, tt.allowedTools)
 			})
+		})
+	}
+}
+
+func Test_sessionHandler_additionalInstructions(t *testing.T) {
+	tests := []struct {
+		name                   string
+		originalInstructions   string
+		additionalInstructions string
+		wantInstructions       string
+	}{
+		{
+			name:             "no instructions",
+			wantInstructions: "",
+		},
+		{
+			name:                 "no additional instructions",
+			originalInstructions: "Say hi",
+			wantInstructions:     "Say hi",
+		},
+		{
+			name:                   "new instructions",
+			additionalInstructions: "And say bye",
+			wantInstructions:       "And say bye",
+		},
+		{
+			name:                   "additional instructions",
+			originalInstructions:   "Say hi",
+			additionalInstructions: "And say bye",
+			wantInstructions:       "Say hi\nAnd say bye",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app, err := types.NewAppV3(types.Metadata{
+				Name: "test-http",
+			}, types.AppSpecV3{
+				URI: "mcp+http://test/mcp",
+				MCP: &types.MCP{
+					AdditionalInstructions: tt.additionalInstructions,
+				},
+			})
+			require.NoError(t, err)
+
+			testCtx := setupTestContext(t, withAdminRole(t), withApp(app))
+			auditor, err := newSessionAuditor(sessionAuditorConfig{
+				emitter:    libevents.NewDiscardEmitter(),
+				hostID:     "test-host-id",
+				sessionCtx: testCtx.SessionCtx,
+				preparer:   &libevents.NoOpPreparer{},
+			})
+			require.NoError(t, err)
+			handler, err := newSessionHandler(sessionHandlerConfig{
+				SessionCtx:     testCtx.SessionCtx,
+				sessionAuditor: auditor,
+				accessPoint:    fakeAccessPoint{},
+				parentCtx:      t.Context(),
+			})
+			require.NoError(t, err)
+
+			// Push a request first to track the ID.
+			_, err = handler.processClientRequest(t.Context(), &mcputils.JSONRPCRequest{
+				Method: mcputils.MethodInitialize,
+				ID:     mcp.NewRequestId(t.Name()),
+			})
+			require.NoError(t, err)
+
+			// Check response.
+			input, err := json.Marshal(mcp.InitializeResult{
+				Instructions: tt.originalInstructions,
+			})
+			require.NoError(t, err)
+			_, msg := handler.processServerResponse(t.Context(), &mcputils.JSONRPCResponse{
+				ID:     mcp.NewRequestId(t.Name()),
+				Result: input,
+			})
+			resp, ok := msg.(*mcputils.JSONRPCResponse)
+			require.True(t, ok)
+
+			initializeResult, err := resp.GetInitializeResult()
+			require.NoError(t, err)
+			require.Equal(t, tt.wantInstructions, initializeResult.Instructions)
 		})
 	}
 }

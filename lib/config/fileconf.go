@@ -2319,6 +2319,9 @@ type MCP struct {
 	// RunAsHostUser is the host user account under which the command will be
 	// executed. Required for stdio-based MCP servers.
 	RunAsHostUser string `yaml:"run_as_host_user,omitempty"`
+	// AdditionalInstructions are added to InitializeResult from MCP server to
+	// provide more context.
+	AdditionalInstructions string `yaml:"additional_instructions,omitempty"`
 }
 
 // Proxy is a `proxy_service` section of the config file:

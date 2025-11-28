@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -166,6 +167,22 @@ func TestValidateApp(t *testing.T) {
 			}(),
 			proxyAddrs: []string{"example.com:443", "example.com:80"},
 			wantErr:    "conflicts with the Teleport Proxy public address",
+		},
+		{
+			name: "MCP additional instructions too large",
+			app: func() types.Application {
+				app, err := types.NewAppV3(types.Metadata{
+					Name: "test-http",
+				}, types.AppSpecV3{
+					URI: "mcp+http://test/mcp",
+					MCP: &types.MCP{
+						AdditionalInstructions: strings.Repeat("a", 2000),
+					},
+				})
+				require.NoError(t, err)
+				return app
+			}(),
+			wantErr: "additional_instructions exceeds maximum siz",
 		},
 	}
 

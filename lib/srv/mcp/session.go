@@ -281,6 +281,8 @@ func (s *sessionHandler) processServerResponse(ctx context.Context, response *mc
 	switch method {
 	case mcputils.MethodToolsList:
 		return method, s.makeToolsCallResponse(ctx, response)
+	case mcputils.MethodInitialize:
+		return method, s.makeInitializeResult(ctx, response)
 	}
 	return method, response
 }
@@ -315,6 +317,37 @@ func (s *sessionHandler) makeToolsCallResponse(ctx context.Context, resp *mcputi
 		JSONRPC: resp.JSONRPC,
 		ID:      resp.ID,
 		Result:  listResult,
+	}
+}
+
+func (s *sessionHandler) makeInitializeResult(ctx context.Context, resp *mcputils.JSONRPCResponse) mcp.JSONRPCMessage {
+	mcpSpec := s.App.GetMCP()
+	if mcpSpec == nil || mcpSpec.AdditionalInstructions == "" {
+		return resp
+	}
+	originalResult, err := resp.GetInitializeResult()
+	if err != nil {
+		// Should not happen but adding additional instructions is also not that important.
+		s.logger.DebugContext(ctx, "Failed to get initialize result", "error", err)
+		return resp
+	}
+
+	if originalResult.Instructions != "" {
+		originalResult.Instructions += "\n"
+	}
+	originalResult.Instructions += mcpSpec.AdditionalInstructions
+
+	updatedResult, err := json.Marshal(originalResult)
+	if err != nil {
+		// Should not happen but adding additional instructions is also not that important.
+		s.logger.DebugContext(ctx, "Failed to marshal initialize result", "error", err)
+		return resp
+	}
+
+	return &mcputils.JSONRPCResponse{
+		JSONRPC: resp.JSONRPC,
+		ID:      resp.ID,
+		Result:  updatedResult,
 	}
 }
 

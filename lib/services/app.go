@@ -72,7 +72,14 @@ type Applications interface {
 
 // ValidateApp validates the Application resource.
 func ValidateApp(app types.Application, proxyGetter ProxyGetter) error {
-	// If no public address is set, there's nothing to validate.
+	if mcp := app.GetMCP(); mcp != nil {
+		// Arbitrary size to avoid bloating the app definition.
+		if len(mcp.AdditionalInstructions) > 1024 {
+			return trace.BadParameter("additional_instructions exceeds maximum size of 1024 characters")
+		}
+	}
+
+	// If no public address is set, there's nothing else to validate.
 	if app.GetPublicAddr() == "" {
 		return nil
 	}

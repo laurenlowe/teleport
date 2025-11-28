@@ -1188,6 +1188,9 @@ message MCP {
   // RunAsHostUser is the host user account under which the command will be
   // executed. Required for stdio-based MCP servers.
   string run_as_host_user = 3;
+  // AdditionalInstructions are added to InitializeResult from MCP server to
+  // provide more context.
+  string additional_instructions = 4;
 }
 
 // Rewrite is a list of rewriting rules to apply to requests and responses.

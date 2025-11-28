@@ -53,9 +53,10 @@ func TestMain(m *testing.M) {
 }
 
 type setupTestContextOptions struct {
-	roleSet    services.RoleSet
-	app        types.Application
-	clientConn net.Conn
+	roleSet                services.RoleSet
+	app                    types.Application
+	clientConn             net.Conn
+	additionalInstructions string
 }
 
 type setupTestContextOptionFunc func(*setupTestContextOptions)
